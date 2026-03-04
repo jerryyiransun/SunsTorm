@@ -87,8 +87,74 @@ StatusOr<Problem> ReadProblem(const std::string& filename) {
 }
 
 StatusOr<Solution> ReadSolution(const std::string& filename) {
-    // Placeholder implementation
-    return UnimplementedError("ReadSolution not yet implemented");
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        return absl::NotFoundError("File not found: " + filename);
+    }
+
+    json data;
+    try {
+        data = json::parse(file);
+    } catch (const json::parse_error& e) {
+        return absl::InvalidArgumentError(std::string("JSON parse error: ") + e.what());
+    }
+
+    Solution solution;
+
+    try {
+        // Parse Subgraphs
+        const auto& subgraphs = data.at("subgraphs");
+        const auto& granularities = data.at("granularities");
+        const auto& tensors_to_retain = data.at("tensors_to_retain");
+        const auto& traversal_orders = data.at("traversal_orders");
+        const auto& subgraph_latencies = data.at("subgraph_latencies");
+        
+        // Check all same size
+        if (subgraphs.size() != granularities.size() || 
+            subgraphs.size() != tensors_to_retain.size() || 
+            subgraphs.size() != traversal_orders.size() || 
+            subgraphs.size() != subgraph_latencies.size()) {
+            return absl::InvalidArgumentError("Subgraph arrays must all be the same size");
+        }
+
+        // Check all the subgraph latency are positive
+        for (size_t i = 0; i < subgraph_latencies.size(); i++) {
+            if (subgraph_latencies[i].get<SubgraphLatency>() < 0) {
+                return absl::InvalidArgumentError("Subgraph latency must be positive");
+            }
+        }
+
+        for (size_t i = 0; i < subgraphs.size(); i++) {
+            Subgraph subgraph;
+            subgraph.ops = subgraphs[i].get<Outputs>();
+            subgraph.tensors_to_retain = tensors_to_retain[i].get<Outputs>();
+
+            // Parse granularity
+            const auto& gran = granularities[i];
+            if (gran.size() >= 2) {
+                subgraph.granularity.width = gran[0].get<Width>();
+                subgraph.granularity.height = gran[1].get<Height>();
+                subgraph.granularity.depth = 1;
+            } else {
+                return absl::InvalidArgumentError("native_granularity must have at least 2 elements");
+            }
+
+            const auto& traversal_order = traversal_orders[i];
+            if (traversal_order != nullptr) {
+                subgraph.traversal_order = traversal_order.get<TraversalOrder>();
+            }
+
+            subgraph.subgraph_latency = subgraph_latencies[i].get<SubgraphLatency>();
+            solution.subgraphs.push_back(subgraph);
+        }
+
+    } catch (const json::type_error& e) {
+        return absl::InvalidArgumentError(std::string("JSON type error: ") + e.what());
+    } catch (const json::out_of_range& e) {
+        return absl::InvalidArgumentError(std::string("JSON missing expected field: ") + e.what());
+    }
+
+    return solution;
 }
 
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {

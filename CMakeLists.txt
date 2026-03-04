@@ -19,20 +19,25 @@ FetchContent_MakeAvailable(absl)
 FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
 FetchContent_MakeAvailable(json)
 
-# Define executable and its source files
-add_executable(mlsys main.cpp mlsys.cpp solver.cpp)
-
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_definitions(mlsys PRIVATE DEBUG)
-endif()
-
-# Includes files in the current source directory
-target_include_directories(mlsys PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Link libraries
-target_link_libraries(mlsys PRIVATE
+# Define a common library for shared logic
+add_library(mlsys_lib STATIC mlsys.cpp solver.cpp)
+target_include_directories(mlsys_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(mlsys_lib PUBLIC
     absl::status
     absl::statusor
     absl::time
     nlohmann_json::nlohmann_json
 )
+
+# Define the main executable
+add_executable(mlsys main.cpp)
+target_link_libraries(mlsys PRIVATE mlsys_lib)
+
+# Define the scratch/test executable
+add_executable(scratch scratch.cpp)
+target_link_libraries(scratch PRIVATE mlsys_lib)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(mlsys PRIVATE DEBUG)
+    target_compile_definitions(scratch PRIVATE DEBUG)
+endif()
