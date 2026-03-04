@@ -1,6 +1,7 @@
 #include <iostream>
 #include <string>
 #include "mlsys.h"
+#include "solver.h"
 
 int main(int argc, char* argv[]) {
     if (argc != 3) {
@@ -22,11 +23,19 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     mlsys::Problem problem = problem_status.value();
-    // Debug print the problem
-    std::cout << problem.tensors.size() << " tensors and " << problem.ops.size() << " operations loaded.\n";
+    
+    #ifdef DEBUG
+    std::cout << "***DEBUG*** " << problem.tensors.size() << " tensors and " << problem.ops.size() << " operations loaded.\n";
+    #endif
 
     // Scheduling logic
-    // mlsys::Solution solution = Solve(problem);
+    mlsys::Solver solver;
+    auto solution_status = solver.Solve(problem);
+    if (!solution_status.ok()) {
+        std::cerr << "Error solving problem: " << solution_status.status().message() << "\n";
+        return 1;
+    }
+    mlsys::Solution solution = solution_status.value();
 
     // Write the output
 

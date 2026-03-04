@@ -1,8 +1,10 @@
 #include "mlsys.h"
+
+#include <fstream>
+
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include <fstream>
-#include <nlohmann/json.hpp>
+#include "nlohmann/json.hpp"
 
 using namespace absl;
 using json = nlohmann::json;
@@ -70,7 +72,7 @@ StatusOr<Problem> ReadProblem(const std::string& filename) {
         if (gran.size() >= 2) {
             problem.native_granularity.width = gran[0].get<Width>();
             problem.native_granularity.height = gran[1].get<Height>();
-            problem.native_granularity.depth = 1.get<Depth>();
+            problem.native_granularity.depth = 1;
         } else {
             return absl::InvalidArgumentError("native_granularity must have at least 2 elements");
         }
@@ -92,11 +94,6 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {
     // Placeholder implementation
     return UnimplementedError("Evaluate not yet implemented");
-}
-
-absl::StatusOr<Solution> Solve(const Problem& problem) {
-    // Placeholder implementation
-    return UnimplementedError("Solve not yet implemented");
 }
 
 }  // namespace mlsys

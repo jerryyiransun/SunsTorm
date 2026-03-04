@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 project(MLSysProject CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(ABSL_PROPAGATE_CXX_STD ON)
 
@@ -20,7 +20,11 @@ FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download
 FetchContent_MakeAvailable(json)
 
 # Define executable and its source files
-add_executable(mlsys main.cpp mlsys.cpp)
+add_executable(mlsys main.cpp mlsys.cpp solver.cpp)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(mlsys PRIVATE DEBUG)
+endif()
 
 # Includes files in the current source directory
 target_include_directories(mlsys PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -29,5 +33,6 @@ target_include_directories(mlsys PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(mlsys PRIVATE
     absl::status
     absl::statusor
+    absl::time
     nlohmann_json::nlohmann_json
 )

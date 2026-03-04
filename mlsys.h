@@ -92,8 +92,6 @@ struct Solution {
   bool operator==(const Solution& other) const = default;
 };
 
-absl::StatusOr<Solution> Solve(const Problem& problem);
-
 absl::StatusOr<Solution> ReadSolution(const std::string& filename);
 
 absl::StatusOr<TotalLatency> Evaluate(const Problem& problem,

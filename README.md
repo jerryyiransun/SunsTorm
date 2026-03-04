@@ -8,11 +8,15 @@ This repository contains our C++ scheduling algorithm for Track A of the MLSys 2
 - **C++ Compiler** supporting C++17
 
 ## How to Build
+
 Open your terminal at the project root and run:
 
 ```bash
 # Generate the build files
 cmake -B build
+
+# or Build in DEBUG mode
+cmake -B build -DCMAKE_BUILD_TYPE=Debug
 
 # Compile the project
 cmake --build build
@@ -22,4 +26,7 @@ cmake --build build
 
 ```bash
 ./build/mlsys path/to/input.json path/to/output.json
+
+# example
+./build/mlsys benchmarks/mlsys-2026-1.json out.json
 ```
