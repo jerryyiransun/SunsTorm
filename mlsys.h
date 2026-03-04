@@ -24,7 +24,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "third_party/absl/status/statusor.h"
+#include "absl/status/statusor.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 /////////  Basic definitions for problem & solution data structures.   /////////
@@ -91,6 +91,8 @@ struct Solution {
   std::vector<Subgraph> subgraphs;
   bool operator==(const Solution& other) const = default;
 };
+
+absl::StatusOr<Solution> Solve(const Problem& problem);
 
 absl::StatusOr<Solution> ReadSolution(const std::string& filename);
 
