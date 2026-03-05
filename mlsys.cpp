@@ -8,6 +8,7 @@
 
 using namespace absl;
 using json = nlohmann::json;
+using ordered_json = nlohmann::ordered_json;
 
 namespace mlsys {
 
@@ -94,6 +95,45 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {
     // Placeholder implementation
     return UnimplementedError("Evaluate not yet implemented");
+}
+
+Status WriteSolution(const Solution& solution, const std::string& filename) {
+    ordered_json j;
+    
+    j["subgraphs"] = ordered_json::array();
+    j["granularities"] = ordered_json::array();
+    j["tensors_to_retain"] = ordered_json::array();
+    j["traversal_orders"] = ordered_json::array();
+    j["subgraph_latencies"] = ordered_json::array();
+
+    for (const auto& sg : solution.subgraphs) {
+        j["subgraphs"].push_back(sg.ops);
+        j["granularities"].push_back({
+            sg.granularity.width, 
+            sg.granularity.height, 
+            sg.granularity.depth
+        });
+        j["tensors_to_retain"].push_back(sg.tensors_to_retain);
+        
+        if (sg.traversal_order.has_value()) {
+            j["traversal_orders"].push_back(sg.traversal_order.value());
+        } else {
+            j["traversal_orders"].push_back(nullptr);
+        }
+        
+        j["subgraph_latencies"].push_back(sg.subgraph_latency);
+    }
+
+    // Write to file with a 2-space indentation for readability
+    std::ofstream out_file(filename);
+    if (!out_file.is_open()) {
+        return absl::NotFoundError("Failed to open output file: " + filename);
+    }
+    
+    out_file << j.dump(2) << std::endl;
+    out_file.close();
+
+    return absl::OkStatus();
 }
 
 }  // namespace mlsys
