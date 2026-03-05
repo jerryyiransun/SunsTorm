@@ -278,7 +278,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 if (num_matmuls == 0) {
                     bool has_external_input = false;
                     for (size_t in_idx : subgraph_tensors) {
-                        if (tiled_tensors.count(in_idx) && !currently_retained.count(in_idx)) {
+                        if (!currently_retained.count(in_idx)) {
                             bool prod = false;
                             for (size_t sub_op : sg.ops) {
                                 for (size_t o : problem.ops[sub_op].outputs) if (o == in_idx) prod = true;
