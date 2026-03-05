@@ -273,11 +273,25 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 
             if (is_last_op_output) {
                 // "Specifically the output of the last operation in a subgraph
-                // is output stationary so it must also always stay in fast memory"
-                // This means fully loaded (or rather, the tile size is w x h, and if
-                // it just accumulates, it takes w x h.
-                const auto& t = problem.tensors[t_idx];
-                max_memory_required += t.width * t.height;
+                // is output stationary so it must also always stay in fast memory within a substep"
+                // For pure pointwise subgraphs, the input sharing means the output can reuse input space.
+                if (num_matmuls == 0) {
+                    bool has_external_input = false;
+                    for (size_t in_idx : subgraph_tensors) {
+                        if (tiled_tensors.count(in_idx) && !currently_retained.count(in_idx)) {
+                            bool prod = false;
+                            for (size_t sub_op : sg.ops) {
+                                for (size_t o : problem.ops[sub_op].outputs) if (o == in_idx) prod = true;
+                            }
+                            if (!prod) has_external_input = true;
+                        }
+                    }
+                    if (!has_external_input) {
+                        max_memory_required += sg.granularity.width * sg.granularity.height;
+                    }
+                } else {
+                    max_memory_required += sg.granularity.width * sg.granularity.height;
+                }
             } else if (produced_in_sg) {
                 // Intermediate/ephemeral tensor will just be written and accumulated within the output fast memory space
                 // No need to add extra memory
