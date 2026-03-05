@@ -33,11 +33,11 @@ target_link_libraries(mlsys_lib PUBLIC
 add_executable(mlsys main.cpp)
 target_link_libraries(mlsys PRIVATE mlsys_lib)
 
-# Define the scratch/test executable
-add_executable(scratch scratch.cpp)
-target_link_libraries(scratch PRIVATE mlsys_lib)
+# Define the evaluate_test executable
+add_executable(evaluate_test evaluate_test.cpp)
+target_link_libraries(evaluate_test PRIVATE mlsys_lib)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(mlsys PRIVATE DEBUG)
-    target_compile_definitions(scratch PRIVATE DEBUG)
+    target_compile_definitions(evaluate_test PRIVATE DEBUG)
 endif()
