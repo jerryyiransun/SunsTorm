@@ -97,6 +97,8 @@ absl::StatusOr<Solution> ReadSolution(const std::string& filename);
 absl::StatusOr<TotalLatency> Evaluate(const Problem& problem,
                                       const Solution& solution);
 
+absl::Status WriteSolution(const Solution& solution, const std::string& filename);
+
 }  // namespace mlsys
 
 #endif  // MLSYS_H_
