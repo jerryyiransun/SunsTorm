@@ -168,21 +168,14 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
 }
 
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {
-    std::vector<bool> inputs_satisfied(problem.tensors.size(), false);
+    std::vector<bool> inputs_satisfied(problem.tensors.size(), true);
     
-    // 1. Identify "Problem Inputs" (tensors not produced by any op)
-    std::vector<bool> is_produced(problem.tensors.size(), false);
-    std::vector<int> producer_op(problem.tensors.size(), -1);
+    // 1. Identify tensors that are not produced by any op
+    std::vector<int> producer_op(problem.tensors.size(), -1);   // producer_op[i] is the index of the op that produces tensor i
     for (size_t i = 0; i < problem.ops.size(); ++i) {
         for (size_t out : problem.ops[i].outputs) {
-            is_produced[out] = true;
+            inputs_satisfied[out] = false;  // if the tensor is an output then it does not have its inputs satisfied before any operations are complete
             producer_op[out] = i;
-        }
-    }
-    
-    for (size_t i = 0; i < problem.tensors.size(); ++i) {
-        if (!is_produced[i]) {
-            inputs_satisfied[i] = true;
         }
     }
 
