@@ -136,12 +136,15 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
             subgraph.ops = subgraphs[i].get<Outputs>();
             subgraph.tensors_to_retain = tensors_to_retain[i].get<Outputs>();
 
-            // Parse granularity
             const auto& gran = granularities[i];
             if (gran.size() >= 2) {
                 subgraph.granularity.width = gran[0].get<Width>();
                 subgraph.granularity.height = gran[1].get<Height>();
-                subgraph.granularity.depth = 1;
+                if (gran.size() >= 3) {
+                    subgraph.granularity.depth = gran[2].get<Depth>();
+                } else {
+                    subgraph.granularity.depth = 1;
+                }
             } else {
                 return absl::InvalidArgumentError("native_granularity must have at least 2 elements");
             }
@@ -165,189 +168,158 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
 }
 
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {
-    // 1. Setup the inputs_satisfied map
-    // Initially all inputs are satisfied, then we traverse the operations in order and mark the outputs as NOT satisfied
-    std::vector<bool> inputs_satisfied(problem.tensors.size(), true);
-    for (const auto& op : problem.ops) {
-        for (size_t out : op.outputs) {
-            inputs_satisfied[out] = false;
+    std::vector<bool> inputs_satisfied(problem.tensors.size(), false);
+    
+    // 1. Identify "Problem Inputs" (tensors not produced by any op)
+    std::vector<bool> is_produced(problem.tensors.size(), false);
+    std::vector<int> producer_op(problem.tensors.size(), -1);
+    for (size_t i = 0; i < problem.ops.size(); ++i) {
+        for (size_t out : problem.ops[i].outputs) {
+            is_produced[out] = true;
+            producer_op[out] = i;
+        }
+    }
+    
+    for (size_t i = 0; i < problem.tensors.size(); ++i) {
+        if (!is_produced[i]) {
+            inputs_satisfied[i] = true;
         }
     }
 
     TotalLatency total_latency = 0.0;
-    std::set<size_t> currently_retained;
+    std::set<size_t> prev_retained_tensors;
+    std::vector<bool> op_executed(problem.ops.size(), false);
 
-    // 2. Check each subgraph for dependencies
     for (size_t i = 0; i < solution.subgraphs.size(); ++i) {
-        const auto& sg = solution.subgraphs[i];
-
-        // Ensure ops inputs are satisfied
-        for (size_t op_idx : sg.ops) {
+        const auto& subgraph = solution.subgraphs[i];
+        
+        // --- Dependency Check ---
+        for (size_t op_idx : subgraph.ops) {
             if (op_idx >= problem.ops.size()) {
                 return absl::InvalidArgumentError("[Invalid Op Index] Invalid op index in subgraph");
             }
-            const auto& op = problem.ops[op_idx];
-            for (size_t in : op.inputs) {
+            op_executed[op_idx] = true;
+            
+            for (size_t in : problem.ops[op_idx].inputs) {
                 if (!inputs_satisfied[in]) {
                     return absl::FailedPreconditionError("[Unmet Dependency] Dependency not met for tensor " + std::to_string(in));
                 }
             }
-            // Mark outputs of operation as satisfied
-            // Technically there is only ever 1 output per operation, but we use a loop for consistency
-            for (size_t out : op.outputs) {
+            
+            for (size_t out : problem.ops[op_idx].outputs) {
                 inputs_satisfied[out] = true;
             }
         }
-
-        // 1. Check that the granularity doesn't overflow the fast memory.
-        int64_t memory_for_retained = 0;
-        for (size_t t_idx : currently_retained) {
-            if (t_idx < problem.tensors.size()) {
-                const auto& t = problem.tensors[t_idx];
-                memory_for_retained += t.width * t.height;
-            }
-        }
-
-        // Identify tiled tensors:
-        // "If there are multiple matmul ops within the same subgraph only tile the last 2 matmul inputs"
-        // Interpreted as: the 2 inputs of the LAST MatMul in the subgraph are tiled.
-        std::set<size_t> tiled_tensors;
-        int last_matmul_idx = -1;
-        int num_matmuls = 0;
-        for (int op_i = (int)sg.ops.size() - 1; op_i >= 0; --op_i) {
-            const auto& op = problem.ops[sg.ops[op_i]];
-            if (op.op_type == "MatMul") {
-                if (last_matmul_idx == -1) {
-                    last_matmul_idx = sg.ops[op_i];
-                }
-                num_matmuls++;
-            }
-        }
-
-        if (last_matmul_idx != -1) {
-            // Tile the inputs of the last matmul
-            const auto& matmul_op = problem.ops[last_matmul_idx];
-            for (size_t in_idx : matmul_op.inputs) {
-                tiled_tensors.insert(in_idx);
-            }
-        } else {
-            // For pointwise only subgraphs, tile everything? 
-            // The examples suggest pointwise is tiled by w x h
-            for (size_t op_idx : sg.ops) {
-                const auto& op = problem.ops[op_idx];
-                for (size_t in : op.inputs) tiled_tensors.insert(in);
-                for (size_t out : op.outputs) tiled_tensors.insert(out);
-            }
-        }
-
-        // Collect all tensors used in this subgraph
-        std::set<size_t> subgraph_tensors;
-        for (size_t op_idx : sg.ops) {
-            const auto& op = problem.ops[op_idx];
-            for (size_t in : op.inputs) subgraph_tensors.insert(in);
-            for (size_t out : op.outputs) subgraph_tensors.insert(out);
-        }
-
-        // Calculate max memory footprint required
-        int64_t max_memory_required = memory_for_retained;
         
-        for (size_t t_idx : subgraph_tensors) {
-            // Skip currently retained tensors (already counted)
-            if (currently_retained.count(t_idx)) continue;
-
-            // Check if it's the output of the last operation
-            bool is_last_op_output = false;
-            if (!sg.ops.empty()) {
-                for (size_t out : problem.ops[sg.ops.back()].outputs) {
-                    if (out == t_idx) is_last_op_output = true;
-                }
+        // --- Fast Memory Capacity Check ---
+        int64_t fast_memory = 0;
+        
+        // Tensors retained from previous subgraph
+        for (size_t t : prev_retained_tensors) {
+            fast_memory += problem.tensors[t].width * problem.tensors[t].height;
+        }
+        
+        std::set<size_t> visited_tensors;
+        std::vector<size_t> q;
+        std::set<size_t> subgraph_produced;
+        std::set<size_t> subgraph_consumed;
+        
+        for (size_t op_idx : subgraph.ops) {
+            for (size_t out : problem.ops[op_idx].outputs) {
+                subgraph_produced.insert(out);
             }
-
-            // Check if it was produced in this subgraph (intermediate / ephemeral)
-            bool produced_in_sg = false;
-            for (size_t op_idx : sg.ops) {
-                for (size_t out : problem.ops[op_idx].outputs) {
-                    if (out == t_idx) produced_in_sg = true;
-                }
+            for (size_t in : problem.ops[op_idx].inputs) {
+                subgraph_consumed.insert(in);
             }
-
-            if (is_last_op_output) {
-                // "Specifically the output of the last operation in a subgraph
-                // is output stationary so it must also always stay in fast memory within a substep"
-                // For pure pointwise subgraphs, the input sharing means the output can reuse input space.
-                if (num_matmuls == 0) {
-                    bool has_external_input = false;
-                    for (size_t in_idx : subgraph_tensors) {
-                        if (!currently_retained.count(in_idx)) {
-                            bool prod = false;
-                            for (size_t sub_op : sg.ops) {
-                                for (size_t o : problem.ops[sub_op].outputs) if (o == in_idx) prod = true;
-                            }
-                            if (!prod) has_external_input = true;
-                        }
-                    }
-                    if (!has_external_input) {
-                        max_memory_required += sg.granularity.width * sg.granularity.height;
-                    }
-                } else {
-                    max_memory_required += sg.granularity.width * sg.granularity.height;
-                }
-            } else if (produced_in_sg) {
-                // Intermediate/ephemeral tensor will just be written and accumulated within the output fast memory space
-                // No need to add extra memory
-            } else if (tiled_tensors.count(t_idx)) {    // current tensor is a tiled input
-                // Tiled input
-                // For a MatMul: LHS is (h x k), RHS is (k x w). Pointwise is (h x w).
-                if (num_matmuls > 0) {    // current subgraph has a matmul op
-                    const auto& matmul_op = problem.ops[last_matmul_idx];
-                    if (matmul_op.inputs.size() == 2) {
-                        if (t_idx == matmul_op.inputs[0]) { // LHS
-                            max_memory_required += sg.granularity.height * sg.granularity.depth;
-                        } else if (t_idx == matmul_op.inputs[1]) { // RHS
-                            max_memory_required += sg.granularity.width * sg.granularity.depth;
-                        } else {        // should not happen
-                            assert(false);
-                        }
-                    } else {        // should not happen
-                        assert(false);
-                    }
-                } else {
-                    // should have tiling even for pointwise ops
-                    max_memory_required += sg.granularity.width * sg.granularity.height;
-                }
-            } else {
-                // Fully loaded size
-                const auto& t = problem.tensors[t_idx];
-                max_memory_required += t.width * t.height;
+        }
+        
+        // Final outputs of this subgraph take granularity space
+        for (size_t t : subgraph_produced) {
+            bool is_final_output = (subgraph_consumed.find(t) == subgraph_consumed.end());
+            bool is_retained = (std::find(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(), t) != subgraph.tensors_to_retain.end());
+            
+            if ((is_final_output || is_retained) && visited_tensors.find(t) == visited_tensors.end()) {
+                fast_memory += subgraph.granularity.width * subgraph.granularity.height;
+                visited_tensors.insert(t);
+                q.push_back(t);
             }
         }
 
-        if (max_memory_required > problem.fast_memory_capacity) {
+        // BFS traversal backwards
+        size_t head = 0;
+        std::set<size_t> ops_in_subgraph(subgraph.ops.begin(), subgraph.ops.end());
+
+        while (head < q.size()) {
+            size_t curr_t = q[head++];
+            int prod_idx = producer_op[curr_t];
+            
+            // If tensor is not produced in this subgraph, stop crawling it
+            if (prod_idx == -1 || ops_in_subgraph.find(prod_idx) == ops_in_subgraph.end()) {
+                continue; 
+            }
+            
+            const Op& op = problem.ops[prod_idx];
+            
+            if (op.op_type == "MatMul") {
+                size_t out_t = op.outputs[0];
+                bool is_col_row = (problem.tensors[out_t].width == 1 || problem.tensors[out_t].height == 1);
+                
+                // Process LHS
+                size_t lhs_t = op.inputs[0];
+                if (visited_tensors.find(lhs_t) == visited_tensors.end()) {
+                    visited_tensors.insert(lhs_t);
+                    if (prev_retained_tensors.find(lhs_t) == prev_retained_tensors.end()) {
+                        if (is_col_row) {
+                            fast_memory += problem.tensors[lhs_t].width * problem.tensors[lhs_t].height;
+                        } else {
+                            fast_memory += subgraph.granularity.depth * subgraph.granularity.height; // k * h
+                        }
+                    }
+                    q.push_back(lhs_t);
+                }
+                
+                // Process RHS
+                size_t rhs_t = op.inputs[1];
+                if (visited_tensors.find(rhs_t) == visited_tensors.end()) {
+                    visited_tensors.insert(rhs_t);
+                    if (prev_retained_tensors.find(rhs_t) == prev_retained_tensors.end()) {
+                        if (is_col_row) {
+                            fast_memory += problem.tensors[rhs_t].width * problem.tensors[rhs_t].height;
+                        } else {
+                            fast_memory += subgraph.granularity.width * subgraph.granularity.depth; // w * k
+                        }
+                    }
+                    q.push_back(rhs_t);
+                }
+            } else if (op.op_type == "Pointwise") {
+                for (size_t in_t : op.inputs) {
+                    if (visited_tensors.find(in_t) == visited_tensors.end()) {
+                        visited_tensors.insert(in_t);
+                        // Pointwise inputs do not take extra fast memory space in the tile calculation
+                        q.push_back(in_t);
+                    }
+                }
+            }
+        }
+        
+        if (fast_memory > problem.fast_memory_capacity) {
             return absl::ResourceExhaustedError("[Fast Memory Capacity Exceeded] Fast memory capacity exceeded in subgraph " + std::to_string(i));
         }
-
-        // 3. Return totalLatency
-        total_latency += sg.subgraph_latency;
-
-        // Update currently_retained for next subgraph
-        // Note: Technically redundant since we never append to currently_retained
-        // but good for clarity
-        currently_retained.clear();
-        for (size_t t_idx : sg.tensors_to_retain) {
-            currently_retained.insert(t_idx);
+        
+        // --- Total Latency ---
+        total_latency += subgraph.subgraph_latency;
+        
+        // Update retained tensors for next subgraph
+        prev_retained_tensors.clear();
+        for (size_t t : subgraph.tensors_to_retain) {
+            prev_retained_tensors.insert(t);
         }
     }
-
-    // 4. Check all outputs were produced using inputs_satisfied
-    std::set<size_t> all_outputs;
-    for (const auto& op : problem.ops) {
-        for (size_t out : op.outputs) {
-            all_outputs.insert(out);
-        }
-    }
-    for (size_t out : all_outputs) {
-        if (!inputs_satisfied[out]) {
-            return absl::FailedPreconditionError("[Missed Output] Output " + std::to_string(out) + " was not produced");
+    
+    // --- All Operations Done Check ---
+    for (size_t i = 0; i < problem.tensors.size(); ++i) {
+        if (!inputs_satisfied[i]) {
+            return absl::FailedPreconditionError("[Missed Output] Output " + std::to_string(i) + " was not produced");
         }
     }
 
