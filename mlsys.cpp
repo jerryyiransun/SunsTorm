@@ -236,6 +236,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
         // Final outputs of this subgraph take granularity space
         for (size_t t : subgraph_produced) {
             bool is_final_output = (subgraph_consumed.find(t) == subgraph_consumed.end());
+            // if we need to retain it for the next subgraph
             bool is_retained = (std::find(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(), t) != subgraph.tensors_to_retain.end());
             
             if ((is_final_output || is_retained) && visited_tensors.find(t) == visited_tensors.end()) {
@@ -262,18 +263,14 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             
             if (op.op_type == "MatMul") {
                 size_t out_t = op.outputs[0];
-                bool is_col_row = (problem.tensors[out_t].width == 1 || problem.tensors[out_t].height == 1);
+                // bool is_col_row = (problem.tensors[out_t].width == 1 || problem.tensors[out_t].height == 1);
                 
                 // Process LHS
                 size_t lhs_t = op.inputs[0];
                 if (visited_tensors.find(lhs_t) == visited_tensors.end()) {
                     visited_tensors.insert(lhs_t);
                     if (prev_retained_tensors.find(lhs_t) == prev_retained_tensors.end()) {
-                        if (is_col_row) {
-                            fast_memory += problem.tensors[lhs_t].width * problem.tensors[lhs_t].height;
-                        } else {
-                            fast_memory += subgraph.granularity.depth * subgraph.granularity.height; // k * h
-                        }
+                        fast_memory += subgraph.granularity.depth * subgraph.granularity.height; // k * h
                     }
                     q.push_back(lhs_t);
                 }
@@ -283,11 +280,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 if (visited_tensors.find(rhs_t) == visited_tensors.end()) {
                     visited_tensors.insert(rhs_t);
                     if (prev_retained_tensors.find(rhs_t) == prev_retained_tensors.end()) {
-                        if (is_col_row) {
-                            fast_memory += problem.tensors[rhs_t].width * problem.tensors[rhs_t].height;
-                        } else {
-                            fast_memory += subgraph.granularity.width * subgraph.granularity.depth; // w * k
-                        }
+                        fast_memory += subgraph.granularity.width * subgraph.granularity.depth; // w * k
                     }
                     q.push_back(rhs_t);
                 }
