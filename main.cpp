@@ -32,21 +32,31 @@ int main(int argc, char* argv[]) {
     std::cout << "***DEBUG*** " << problem.tensors.size() << " tensors and " << problem.ops.size() << " operations loaded.\n";
     #endif
 
-    // // Scheduling logic
-    // std::unique_ptr<Solver> solver = std::make_unique<BaseSolver>();
-    // auto solution_status = solver->Solve(problem);
-    // if (!solution_status.ok()) {
-    //     std::cerr << "Error solving problem: " << solution_status.status().message() << "\n";
-    //     return 1;
-    // }
-    // Solution solution = solution_status.value();
+    // Scheduling logic
+    std::unique_ptr<Solver> solver = std::make_unique<BaseSolver>();
+    auto solution_status = solver->Solve(problem);
+    if (!solution_status.ok()) {
+        std::cerr << "Error solving problem: " << solution_status.status().message() << "\n";
+        return 1;
+    }
+    Solution solution = solution_status.value();
 
-    // // Write the output
-    // auto write_status = WriteSolution(solution, output_path);
-    // if (!write_status.ok()) {
-    //     std::cerr << "Error writing output: " << write_status.message() << "\n";
-    //     return 1;
-    // }
+    #ifdef DEBUG
+    auto eval_status = Evaluate(problem, solution);
+    if (eval_status.ok()) {
+        std::cout << "Evaluation successful.\n";
+        std::cout << "Total Latency: " << eval_status.value() << "\n";
+    } else {
+        std::cerr << "Error evaluating solution: " << eval_status.status().message() << "\n";
+    }
+    #endif
+
+    // Write the output
+    auto write_status = WriteSolution(solution, output_path);
+    if (!write_status.ok()) {
+        std::cerr << "Error writing output: " << write_status.message() << "\n";
+        return 1;
+    }
 
     std::cout << "Done.\n";
     return 0;
