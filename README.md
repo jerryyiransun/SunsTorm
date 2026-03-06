@@ -1,4 +1,5 @@
 # MLSys 2026 Google Graph Scheduling Competition
+![Build Status](https://github.com/jerryyiransun/MLSys2026-Google-Graph-Scheduling-Competition/actions/workflows/ci.yaml/badge.svg)
 
 This repository contains our C++ scheduling algorithm for Track A of the MLSys 2026 competition.
 
