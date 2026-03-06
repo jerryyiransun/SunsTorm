@@ -38,6 +38,7 @@ add_executable(evaluate_test evaluate_test.cpp)
 target_link_libraries(evaluate_test PRIVATE mlsys_lib)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(mlsys_lib PRIVATE DEBUG)
     target_compile_definitions(mlsys PRIVATE DEBUG)
     target_compile_definitions(evaluate_test PRIVATE DEBUG)
 endif()

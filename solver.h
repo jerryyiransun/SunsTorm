@@ -7,16 +7,17 @@
 #include "absl/time/time.h"
 #include "mlsys.h"
 
+using namespace absl;
 namespace mlsys {
 class Solver {
 public:
     virtual ~Solver() = default;
-    virtual absl::StatusOr<Solution> Solve(const Problem& problem) = 0;
+    virtual StatusOr<Solution> Solve(const Problem& problem) = 0;
 };
 
 class BaseSolver : public Solver {
 public:
-    absl::StatusOr<Solution> Solve(const Problem& problem) override;
+    StatusOr<Solution> Solve(const Problem& problem) override;
 };
 
 }  // namespace mlsys
