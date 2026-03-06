@@ -212,11 +212,11 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
         }
         
         // --- Fast Memory Capacity Check ---
-        int64_t fast_memory = 0;
+        int64_t fast_memory_usage = 0;
         
         // Tensors retained from previous subgraph
         for (size_t t : prev_retained_tensors) {
-            fast_memory += problem.tensors[t].width * problem.tensors[t].height;
+            fast_memory_usage += problem.tensors[t].width * problem.tensors[t].height;
         }
         
         std::set<size_t> visited_tensors;
@@ -240,7 +240,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             bool is_retained = (std::find(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(), t) != subgraph.tensors_to_retain.end());
             
             if ((is_final_output || is_retained) && visited_tensors.find(t) == visited_tensors.end()) {
-                fast_memory += subgraph.granularity.width * subgraph.granularity.height;
+                fast_memory_usage += subgraph.granularity.width * subgraph.granularity.height;
                 visited_tensors.insert(t);
                 q.push_back(t);
             }
@@ -263,14 +263,13 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             
             if (op.op_type == "MatMul") {
                 size_t out_t = op.outputs[0];
-                // bool is_col_row = (problem.tensors[out_t].width == 1 || problem.tensors[out_t].height == 1);
                 
                 // Process LHS
                 size_t lhs_t = op.inputs[0];
                 if (visited_tensors.find(lhs_t) == visited_tensors.end()) {
                     visited_tensors.insert(lhs_t);
                     if (prev_retained_tensors.find(lhs_t) == prev_retained_tensors.end()) {
-                        fast_memory += subgraph.granularity.depth * subgraph.granularity.height; // k * h
+                        fast_memory_usage += subgraph.granularity.depth * subgraph.granularity.height; // k * h
                     }
                     q.push_back(lhs_t);
                 }
@@ -280,7 +279,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 if (visited_tensors.find(rhs_t) == visited_tensors.end()) {
                     visited_tensors.insert(rhs_t);
                     if (prev_retained_tensors.find(rhs_t) == prev_retained_tensors.end()) {
-                        fast_memory += subgraph.granularity.width * subgraph.granularity.depth; // w * k
+                        fast_memory_usage += subgraph.granularity.width * subgraph.granularity.depth; // w * k
                     }
                     q.push_back(rhs_t);
                 }
@@ -295,7 +294,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             }
         }
         
-        if (fast_memory > problem.fast_memory_capacity) {
+        if (fast_memory_usage > problem.fast_memory_capacity) {
             return absl::ResourceExhaustedError("[Fast Memory Capacity Exceeded] Fast memory capacity exceeded in subgraph " + std::to_string(i));
         }
         
