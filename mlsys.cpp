@@ -203,6 +203,12 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             size_t out = problem.ops[op_idx].outputs[0];
             inputs_satisfied[out] = true;
         }
+
+        // --- Output Granularity < Input Granularity Check ---
+        for (size_t op_idx : subgraph.ops) {
+           assert(subgraph.granularity.width <= problem.tensors[op_idx].width);
+           assert(subgraph.granularity.height <= problem.tensors[op_idx].height);
+        }
         
         // --- Fast Memory Capacity Check ---
         FastMemoryCapacity fast_memory_usage = 0;
@@ -227,6 +233,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
         
         for (size_t op_idx : subgraph.ops) {
             assert(problem.ops[op_idx].outputs.size() == 1);
+
             size_t out = problem.ops[op_idx].outputs[0];
             subgraph_produced.insert(out);
 
