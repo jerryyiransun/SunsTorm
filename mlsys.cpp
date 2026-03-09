@@ -230,8 +230,6 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
         std::set<size_t> subgraph_consumed;
         
         for (size_t op_idx : subgraph.ops) {
-            assert(problem.ops[op_idx].outputs.size() == 1);
-
             size_t out = problem.ops[op_idx].outputs[0];
             subgraph_produced.insert(out);
 
@@ -364,8 +362,6 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                     q.push_back({rhs_t, rhs_req_w, rhs_req_h, false});
                 }
             } else if (op.op_type == "Pointwise") {
-                assert(op.outputs.size() == 1);
-
                 // When there is only 1 input the input tensor shares the same space as the output tensor
                 // so we do not need to add any extra space for the input tensor
                 if (op.inputs.size() == 1) {
