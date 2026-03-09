@@ -188,13 +188,12 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
         
         // --- Dependency Check ---
         for (size_t op_idx : subgraph.ops) {
-            assert(subgraph.granularity.width <= problem.tensors[op_idx].width);
-            assert(subgraph.granularity.height <= problem.tensors[op_idx].height);
-            assert(problem.ops[op_idx].outputs.size() == 1);
-            
             if (op_idx >= problem.ops.size()) {
                 return absl::InvalidArgumentError("[Invalid Op Index] Invalid op index in subgraph");
             }
+            assert(subgraph.granularity.width <= problem.tensors[op_idx].width);
+            assert(subgraph.granularity.height <= problem.tensors[op_idx].height);
+            assert(problem.ops[op_idx].outputs.size() == 1);
 
             op_executed[op_idx] = true;
             
