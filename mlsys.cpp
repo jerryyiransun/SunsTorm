@@ -193,7 +193,6 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             }
             assert(subgraph.granularity.width <= problem.tensors[op_idx].width);
             assert(subgraph.granularity.height <= problem.tensors[op_idx].height);
-            assert(problem.ops[op_idx].outputs.size() == 1);
 
             op_executed[op_idx] = true;
             
@@ -223,8 +222,9 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             #endif
         }
         
-        std::set<size_t> visited_tensors;
-        std::vector<std::tuple<size_t, int, int, bool>> q;
+        std::set<size_t> visited_tensors; 
+        // Queue of tensors to process in the form of (tensor_id, required_width, required_height, is_final_output_or_retained)
+        std::vector<std::tuple<size_t, Width, Height, bool>> q;
         std::set<size_t> subgraph_produced;
         std::set<size_t> subgraph_consumed;
         
@@ -287,7 +287,6 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             const Op& op = problem.ops[prod_idx];
             
             if (op.op_type == "MatMul") {
-                assert(op.outputs.size() == 1);
                 assert(op.inputs.size() == 2);
 
                 size_t lhs_t = op.inputs[0];
@@ -306,8 +305,8 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 #endif
 
                 // Process LHS
-                int lhs_req_w = inner_k;                    // k
-                int lhs_req_h = req_h;                      // h
+                Width lhs_req_w = inner_k;
+                Height lhs_req_h = req_h;
                 
                 if (visited_tensors.find(lhs_t) == visited_tensors.end()) {
                     visited_tensors.insert(lhs_t);
@@ -334,8 +333,8 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 }
                 
                 // Process RHS
-                int rhs_req_w = req_w;                       // w
-                int rhs_req_h = inner_k;                     // k
+                Width rhs_req_w = req_w;
+                Height rhs_req_h = inner_k;
                 
                 if (visited_tensors.find(rhs_t) == visited_tensors.end()) {
                     visited_tensors.insert(rhs_t);
