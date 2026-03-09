@@ -170,7 +170,7 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {
     std::vector<bool> inputs_satisfied(problem.tensors.size(), true);
     
-    // 1. Identify tensors that are not produced by any op
+    // Identify tensors that are not produced by any op
     std::vector<int> producer_op(problem.tensors.size(), -1);   // producer_op[i] is the index of the op that produces tensor i
     for (size_t i = 0; i < problem.ops.size(); ++i) {
         assert(problem.ops[i].outputs.size() == 1);
@@ -188,9 +188,14 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
         
         // --- Dependency Check ---
         for (size_t op_idx : subgraph.ops) {
+            assert(subgraph.granularity.width <= problem.tensors[op_idx].width);
+            assert(subgraph.granularity.height <= problem.tensors[op_idx].height);
+            assert(problem.ops[op_idx].outputs.size() == 1);
+            
             if (op_idx >= problem.ops.size()) {
                 return absl::InvalidArgumentError("[Invalid Op Index] Invalid op index in subgraph");
             }
+
             op_executed[op_idx] = true;
             
             for (size_t in : problem.ops[op_idx].inputs) {
@@ -199,15 +204,8 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 }
             }
             
-            assert(problem.ops[op_idx].outputs.size() == 1);
             size_t out = problem.ops[op_idx].outputs[0];
             inputs_satisfied[out] = true;
-        }
-
-        // --- Output Granularity < Input Granularity Check ---
-        for (size_t op_idx : subgraph.ops) {
-           assert(subgraph.granularity.width <= problem.tensors[op_idx].width);
-           assert(subgraph.granularity.height <= problem.tensors[op_idx].height);
         }
         
         // --- Fast Memory Capacity Check ---
