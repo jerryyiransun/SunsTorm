@@ -248,19 +248,13 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 visited_tensors.insert(t);
                 q.push_back({t, subgraph.granularity.width, subgraph.granularity.height, true});
 
-                if (is_final_output) {
-                    #ifdef DEBUG
-                    std::cout << "[DEBUG] Tensor " << t << " (subgraph output) takes " << subgraph.granularity.width * subgraph.granularity.height 
-                              << " (w=" << subgraph.granularity.width << " h=" << subgraph.granularity.height << ")"
-                              << " | total_mem=" << fast_memory_usage << "\n";
-                    #endif
-                } else if (is_to_be_retained) {
-                    #ifdef DEBUG
-                    std::cout << "[DEBUG] Tensor " << t << " (to be retained) takes " << subgraph.granularity.width * subgraph.granularity.height 
-                              << " (w=" << subgraph.granularity.width << " h=" << subgraph.granularity.height << ")"
-                              << " | total_mem=" << fast_memory_usage << "\n";
-                    #endif
-                }
+                #ifdef DEBUG
+                std::cout << "[DEBUG] Tensor " << t 
+                          << (is_final_output ? " (subgraph output)" : " (to be retained)")
+                          << " takes " << subgraph.granularity.width * subgraph.granularity.height 
+                          << " (w=" << subgraph.granularity.width << " h=" << subgraph.granularity.height << ")"
+                          << " | total_mem=" << fast_memory_usage << "\n";
+                #endif
             }
         }
 
@@ -314,21 +308,16 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                     bool lhs_is_retained = (std::find(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(), lhs_t) != subgraph.tensors_to_retain.end());
                     
                     if (!lhs_is_ephemeral && !lhs_is_retained) {
-                        fast_memory_usage += lhs_req_w * lhs_req_h; 
-                        #ifdef DEBUG
-                        std::cout << "[DEBUG] MatMul LHS Tensor " << lhs_t << " takes " << lhs_req_w * lhs_req_h 
-                                  << " (req_w=" << lhs_req_w << " req_h=" << lhs_req_h << ")"
-                                  << " | total_mem=" << fast_memory_usage << "\n";
-                        #endif
-                    } else if (lhs_is_ephemeral) {
-                        #ifdef DEBUG
-                        std::cout << "[DEBUG] MatMul LHS Tensor " << lhs_t << " is EPHEMERAL! Takes 0 bytes\n";
-                        #endif
-                    } else if (lhs_is_retained) {
-                        #ifdef DEBUG
-                        std::cout << "[DEBUG] MatMul LHS Tensor " << lhs_t << " is RETAINED! Takes 0 bytes\n";
-                        #endif
+                        fast_memory_usage += lhs_req_w * lhs_req_h;
                     }
+                    #ifdef DEBUG
+                    std::cout << "[DEBUG] MatMul LHS Tensor " << lhs_t
+                            << (lhs_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes" 
+                                : lhs_is_retained ? " is RETAINED! Takes 0 bytes"
+                                : " takes " + std::to_string(lhs_req_w * lhs_req_h) 
+                                    + " (req_w=" + std::to_string(lhs_req_w) + " req_h=" + std::to_string(lhs_req_h) + ")")
+                            << " | total_mem=" << fast_memory_usage << "\n";
+                    #endif
                     q.push_back({lhs_t, lhs_req_w, lhs_req_h, false});
                 }
                 
@@ -343,20 +332,15 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                     
                     if (!rhs_is_ephemeral && !rhs_is_retained) {
                         fast_memory_usage += rhs_req_w * rhs_req_h;
-                        #ifdef DEBUG
-                        std::cout << "[DEBUG] MatMul RHS Tensor " << rhs_t << " takes " << rhs_req_w * rhs_req_h 
-                                  << " (req_w=" << rhs_req_w << " req_h=" << rhs_req_h << ")"
-                                  << " | total_mem=" << fast_memory_usage << "\n";
-                        #endif
-                    } else if (rhs_is_ephemeral) {
-                        #ifdef DEBUG
-                        std::cout << "[DEBUG] MatMul RHS Tensor " << rhs_t << " is EPHEMERAL! Takes 0 bytes\n";
-                        #endif
-                    } else if (rhs_is_retained) {
-                        #ifdef DEBUG
-                        std::cout << "[DEBUG] MatMul RHS Tensor " << rhs_t << " is RETAINED! Takes 0 bytes\n";
-                        #endif
                     }
+                    #ifdef DEBUG
+                    std::cout << "[DEBUG] MatMul RHS Tensor " << rhs_t
+                            << (rhs_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes"
+                                : rhs_is_retained ? " is RETAINED! Takes 0 bytes"
+                                : " takes " + std::to_string(rhs_req_w * rhs_req_h)
+                                    + " (req_w=" + std::to_string(rhs_req_w) + " req_h=" + std::to_string(rhs_req_h) + ")")
+                            << " | total_mem=" << fast_memory_usage << "\n";
+                    #endif
                     q.push_back({rhs_t, rhs_req_w, rhs_req_h, false});
                 }
             } else if (op.op_type == "Pointwise") {
@@ -376,19 +360,19 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                         if (visited_tensors.find(in_t) == visited_tensors.end()) {
                             visited_tensors.insert(in_t);
                             bool in_is_ephemeral = (subgraph_produced.find(in_t) != subgraph_produced.end());
+                            bool in_is_retained = (prev_retained_tensors.find(in_t) != prev_retained_tensors.end());
                             
-                            if (prev_retained_tensors.find(in_t) == prev_retained_tensors.end() && !in_is_ephemeral) {
+                            if (!in_is_ephemeral && !in_is_retained) {
                                 fast_memory_usage += req_w * req_h;
-                                #ifdef DEBUG
-                                std::cout << "[DEBUG] Pointwise Input Tensor " << in_t << " takes " << req_w * req_h 
-                                          << " (req_w=" << req_w << " req_h=" << req_h << ")"
-                                          << " | total_mem=" << fast_memory_usage << "\n";
-                                #endif
-                            } else if (in_is_ephemeral) {
-                                #ifdef DEBUG
-                                std::cout << "[DEBUG] Pointwise Input Tensor " << in_t << " is EPHEMERAL! Takes 0 bytes\n";
-                                #endif
                             }
+                            #ifdef DEBUG
+                            std::cout << "[DEBUG] Pointwise Input Tensor " << in_t
+                                      << (in_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes"
+                                          : in_is_retained ? " is RETAINED! Takes 0 bytes"
+                                          : " takes " + std::to_string(req_w * req_h)
+                                            + " (req_w=" + std::to_string(req_w) + " req_h=" + std::to_string(req_h) + ")")
+                                      << " | total_mem=" << fast_memory_usage << "\n";
+                            #endif
                             q.push_back({in_t, req_w, req_h, false});
                         }
                     }
