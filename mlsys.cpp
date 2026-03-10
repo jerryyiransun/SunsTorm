@@ -146,7 +146,7 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
                     subgraph.granularity.depth = 1;
                 }
             } else {
-                return absl::InvalidArgumentError("native_granularity must have at least 2 elements");
+                return absl::InvalidArgumentError("granularity must have at least 2 elements");
             }
 
             const auto& traversal_order = traversal_orders[i];
@@ -403,7 +403,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                         q.push_back({in_tensor_idx, curr_tensor_dim, false});
                     }
                 } else {
-                    // Otherwise the each of the input needs to be the same w,h size as the output
+                    // Otherwise each of the input needs to be the same w,h size as the output
                     // so we need to add the space for each of the inputs
                     for (size_t in_tensor_idx : op.inputs) {
                         if (!visited_tensors.contains(in_tensor_idx)) {
