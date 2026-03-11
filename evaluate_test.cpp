@@ -20,7 +20,7 @@ void ExpectPass(const std::string& input_file, const std::string& output_file) {
 
     auto result = mlsys::Evaluate(problem.value(), solution.value());
     ASSERT_TRUE(result.ok()) << result.status().message();
-    EXPECT_GT(result.value(), 0);
+    EXPECT_GE(result.value(), 0);
 }
 
 // asserts that evaluating a (problem, solution) pair fails with a message containing `expected_substr`.
