@@ -39,11 +39,20 @@ int main() {
         {"examples/example-1-input.json", "examples/example-1-output-C.json", "Pass"},
         {"examples/example-1-input.json", "examples/example-1-output-F-dependency.json", "[Unmet Dependency]"},
         {"examples/example-1-input.json", "examples/example-1-output-F-invalid-op.json", "[Invalid Op Index]"},
-        {"examples/example-5-input.json", "examples/example-5-output-F-capacity.json", "[Fast Memory Capacity Exceeded]"},
         {"examples/example-1-input.json", "examples/example-1-output-F-missed-output.json", "[Missed Output]"},
         
-        // I don't see proper output JSON files for examples 2-5 in the directory, 
-        // presumably I should only test what exists in the examples dir. Wait, I'll check what files exist.
+        {"examples/example-2-input.json", "examples/example-2-output-A.json", "Pass"},
+        {"examples/example-2-input.json", "examples/example-2-output-B.json", "Pass"},
+        
+        {"examples/example-3-input.json", "examples/example-3-output-A.json", "Pass"},
+        {"examples/example-3-input.json", "examples/example-3-output-B.json", "Pass"},
+        {"examples/example-3-input.json", "examples/example-3-output-C.json", "Pass"},
+        
+        {"examples/example-4-input.json", "examples/example-4-output-A.json", "Pass"},
+        {"examples/example-4-input.json", "examples/example-4-output-B.json", "Pass"},
+        
+        {"examples/example-5-input.json", "examples/example-5-output-F-capacity.json", "[Fast Memory Capacity Exceeded]"},
+        {"examples/example-5-input.json", "examples/example-5-output-B.json", "Pass"},
     };
 
     int failures = 0;

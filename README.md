@@ -16,8 +16,8 @@ Open your terminal at the project root and run:
 # Generate the build files
 cmake -B build
 
-# or Build in DEBUG mode
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
+# build both debug and release mode
+cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug
 
 # Compile the project
 cmake --build build

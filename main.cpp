@@ -41,6 +41,16 @@ int main(int argc, char* argv[]) {
     }
     Solution solution = solution_status.value();
 
+    #ifdef DEBUG
+    auto eval_status = Evaluate(problem, solution);
+    if (eval_status.ok()) {
+        std::cout << "Evaluation successful.\n";
+        std::cout << "Total Latency: " << eval_status.value() << "\n";
+    } else {
+        std::cerr << "Error evaluating solution: " << eval_status.status().message() << "\n";
+    }
+    #endif
+
     // Write the output
     auto write_status = WriteSolution(solution, output_path);
     if (!write_status.ok()) {
