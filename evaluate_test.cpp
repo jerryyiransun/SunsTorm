@@ -1,72 +1,117 @@
-#include <iostream>
+#include <string>
+
+#include <gtest/gtest.h>
+
 #include "mlsys.h"
-#include "solver.h"
 
-#include <vector>
+namespace {
 
-bool RunTest(const std::string& input_path, const std::string& output_path, const std::string& expected_result) {
-    std::cout << "Testing " << input_path << " with " << output_path << "\n";
-    
-    auto problem_status = mlsys::ReadProblem(input_path);
-    if (!problem_status.ok()) {
-        std::cout << "  [FAIL] Failed to read problem: " << problem_status.status().message() << "\n";
-        return false;
-    }
-
-    auto solution_status = mlsys::ReadSolution(output_path);
-    if (!solution_status.ok()) {
-        std::cout << "  [FAIL] Failed to read solution: " << solution_status.status().message() << "\n";
-        return false;
-    }
-
-    auto eval_status = mlsys::Evaluate(problem_status.value(), solution_status.value());
-    if (eval_status.ok() && expected_result == "Pass") {
-        std::cout << "  [PASS] Total Latency: " << eval_status.value() << "\n";
-        return true;
-    } else if (!eval_status.ok() && eval_status.status().message().find(expected_result) != std::string::npos){
-        std::cout << "  [PASS] Expected " << expected_result << ", Got " << eval_status.status().message() << "\n";
-        return true;
-    } else {
-        std::cout << "  [FAIL] Expected " << expected_result << ", Got " << (eval_status.ok() ? "Pass" : std::string(eval_status.status().message())) << "\n";
-        return false;
-    }
+std::string TestDataPath(const std::string& filename) {
+    return std::string(TEST_DATA_DIR) + "/" + filename;
 }
 
-int main() {
-    std::vector<std::vector<std::string>> tests = {
-        {"examples/example-1-input.json", "examples/example-1-output-A.json", "Pass"},
-        {"examples/example-1-input.json", "examples/example-1-output-B.json", "Pass"},
-        {"examples/example-1-input.json", "examples/example-1-output-C.json", "Pass"},
-        {"examples/example-1-input.json", "examples/example-1-output-F-dependency.json", "[Unmet Dependency]"},
-        {"examples/example-1-input.json", "examples/example-1-output-F-invalid-op.json", "[Invalid Op Index]"},
-        {"examples/example-1-input.json", "examples/example-1-output-F-missed-output.json", "[Missed Output]"},
-        
-        {"examples/example-2-input.json", "examples/example-2-output-A.json", "Pass"},
-        {"examples/example-2-input.json", "examples/example-2-output-B.json", "Pass"},
-        
-        {"examples/example-3-input.json", "examples/example-3-output-A.json", "Pass"},
-        {"examples/example-3-input.json", "examples/example-3-output-B.json", "Pass"},
-        {"examples/example-3-input.json", "examples/example-3-output-C.json", "Pass"},
-        
-        {"examples/example-4-input.json", "examples/example-4-output-A.json", "Pass"},
-        {"examples/example-4-input.json", "examples/example-4-output-B.json", "Pass"},
-        
-        {"examples/example-5-input.json", "examples/example-5-output-F-capacity.json", "[Fast Memory Capacity Exceeded]"},
-        {"examples/example-5-input.json", "examples/example-5-output-B.json", "Pass"},
-    };
+// asserts that evaluating a (problem, solution) pair succeeds.
+void ExpectPass(const std::string& input_file, const std::string& output_file) {
+    auto problem = mlsys::ReadProblem(TestDataPath(input_file));
+    ASSERT_TRUE(problem.ok()) << problem.status().message();
 
-    int failures = 0;
-    for (const auto& test : tests) {
-        if (!RunTest(test[0], test[1], test[2])) {
-            failures++;
-        }
-    }
+    auto solution = mlsys::ReadSolution(TestDataPath(output_file));
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    if (failures > 0) {
-        std::cout << failures << " test(s) failed.\n";
-        return 1;
-    }
-
-    std::cout << "All tests passed.\n";
-    return 0;
+    auto result = mlsys::Evaluate(problem.value(), solution.value());
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_GE(result.value(), 0);
 }
+
+// asserts that evaluating a (problem, solution) pair fails with a message containing `expected_substr`.
+void ExpectFail(const std::string& input_file, const std::string& output_file,
+                const std::string& expected_substr) {
+    auto problem = mlsys::ReadProblem(TestDataPath(input_file));
+    ASSERT_TRUE(problem.ok()) << problem.status().message();
+
+    auto solution = mlsys::ReadSolution(TestDataPath(output_file));
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
+
+    auto result = mlsys::Evaluate(problem.value(), solution.value());
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find(expected_substr),
+              std::string::npos)
+        << "Expected error containing \"" << expected_substr
+        << "\", got: " << result.status().message();
+}
+
+// ---- Example 1 ----
+
+TEST(EvaluateTest, Example1_OutputA_Pass) {
+    ExpectPass("example-1-input.json", "example-1-output-A.json");
+}
+
+TEST(EvaluateTest, Example1_OutputB_Pass) {
+    ExpectPass("example-1-input.json", "example-1-output-B.json");
+}
+
+TEST(EvaluateTest, Example1_OutputC_Pass) {
+    ExpectPass("example-1-input.json", "example-1-output-C.json");
+}
+
+TEST(EvaluateTest, Example1_Fail_Dependency) {
+    ExpectFail("example-1-input.json", "example-1-output-F-dependency.json",
+               "[Unmet Dependency]");
+}
+
+TEST(EvaluateTest, Example1_Fail_InvalidOp) {
+    ExpectFail("example-1-input.json", "example-1-output-F-invalid-op.json",
+               "[Invalid Op Index]");
+}
+
+TEST(EvaluateTest, Example1_Fail_MissedOutput) {
+    ExpectFail("example-1-input.json", "example-1-output-F-missed-output.json",
+               "[Missed Output]");
+}
+
+// ---- Example 2 ----
+
+TEST(EvaluateTest, Example2_OutputA_Pass) {
+    ExpectPass("example-2-input.json", "example-2-output-A.json");
+}
+
+TEST(EvaluateTest, Example2_OutputB_Pass) {
+    ExpectPass("example-2-input.json", "example-2-output-B.json");
+}
+
+// ---- Example 3 ----
+
+TEST(EvaluateTest, Example3_OutputA_Pass) {
+    ExpectPass("example-3-input.json", "example-3-output-A.json");
+}
+
+TEST(EvaluateTest, Example3_OutputB_Pass) {
+    ExpectPass("example-3-input.json", "example-3-output-B.json");
+}
+
+TEST(EvaluateTest, Example3_OutputC_Pass) {
+    ExpectPass("example-3-input.json", "example-3-output-C.json");
+}
+
+// ---- Example 4 ----
+
+TEST(EvaluateTest, Example4_OutputA_Pass) {
+    ExpectPass("example-4-input.json", "example-4-output-A.json");
+}
+
+TEST(EvaluateTest, Example4_OutputB_Pass) {
+    ExpectPass("example-4-input.json", "example-4-output-B.json");
+}
+
+// ---- Example 5 ----
+
+TEST(EvaluateTest, Example5_Fail_Capacity) {
+    ExpectFail("example-5-input.json", "example-5-output-F-capacity.json",
+               "[Fast Memory Capacity Exceeded]");
+}
+
+TEST(EvaluateTest, Example5_OutputB_Pass) {
+    ExpectPass("example-5-input.json", "example-5-output-B.json");
+}
+
+}  // namespace
