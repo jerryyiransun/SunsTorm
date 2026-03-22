@@ -1,6 +1,4 @@
-#ifndef MLSYS_SOLVER_H
-#define MLSYS_SOLVER_H
-
+#pragma once
 #include <optional>
 
 #include "absl/status/statusor.h"
@@ -10,16 +8,19 @@
 using namespace absl;
 namespace mlsys {
 class Solver {
-public:
+  public:
     virtual ~Solver() = default;
-    virtual StatusOr<Solution> Solve(const Problem& problem) = 0;
+    virtual auto solve(const Problem& problem) -> StatusOr<Solution> = 0;
 };
 
 class BaseSolver : public Solver {
-public:
-    StatusOr<Solution> Solve(const Problem& problem) override;
+  public:
+    auto solve(const Problem& problem) -> StatusOr<Solution> override;
 };
 
-}  // namespace mlsys
+class BruteForceSolver : public Solver {
+  public:
+    auto solve(const Problem& problem) -> StatusOr<Solution> override;
+};
 
-#endif  // MLSYS_SOLVER_H
+} // namespace mlsys

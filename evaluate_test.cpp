@@ -34,8 +34,7 @@ void ExpectFail(const std::string& input_file, const std::string& output_file,
 
     auto result = mlsys::Evaluate(problem.value(), solution.value());
     ASSERT_FALSE(result.ok());
-    EXPECT_NE(std::string(result.status().message()).find(expected_substr),
-              std::string::npos)
+    EXPECT_NE(std::string(result.status().message()).find(expected_substr), std::string::npos)
         << "Expected error containing \"" << expected_substr
         << "\", got: " << result.status().message();
 }
@@ -55,18 +54,15 @@ TEST(EvaluateTest, Example1_OutputC_Pass) {
 }
 
 TEST(EvaluateTest, Example1_Fail_Dependency) {
-    ExpectFail("example-1-input.json", "example-1-output-F-dependency.json",
-               "[Unmet Dependency]");
+    ExpectFail("example-1-input.json", "example-1-output-F-dependency.json", "[Unmet Dependency]");
 }
 
 TEST(EvaluateTest, Example1_Fail_InvalidOp) {
-    ExpectFail("example-1-input.json", "example-1-output-F-invalid-op.json",
-               "[Invalid Op Index]");
+    ExpectFail("example-1-input.json", "example-1-output-F-invalid-op.json", "[Invalid Op Index]");
 }
 
 TEST(EvaluateTest, Example1_Fail_MissedOutput) {
-    ExpectFail("example-1-input.json", "example-1-output-F-missed-output.json",
-               "[Missed Output]");
+    ExpectFail("example-1-input.json", "example-1-output-F-missed-output.json", "[Missed Output]");
 }
 
 // ---- Example 2 ----
@@ -114,4 +110,4 @@ TEST(EvaluateTest, Example5_OutputB_Pass) {
     ExpectPass("example-5-input.json", "example-5-output-B.json");
 }
 
-}  // namespace
+} // namespace

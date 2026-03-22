@@ -47,58 +47,57 @@ using TraversalOrder = std::vector<int64_t>;
 using Width = int64_t;
 
 struct Tensor {
-  Width width;
-  Height height;
-  bool operator==(const Tensor& other) const = default;
+    Width width;
+    Height height;
+    bool operator==(const Tensor& other) const = default;
 };
 
 struct Op {
-  OpType op_type;
-  Inputs inputs;
-  Outputs outputs;
-  BaseCost base_cost;
-  bool operator==(const Op& other) const = default;
+    OpType op_type;
+    Inputs inputs;
+    Outputs outputs;
+    BaseCost base_cost;
+    bool operator==(const Op& other) const = default;
 };
 
 struct Granularity {
-  Width width;
-  Height height;
-  Depth depth;
-  bool operator==(const Granularity& other) const = default;
+    Width width;
+    Height height;
+    Depth depth;
+    bool operator==(const Granularity& other) const = default;
 };
 
 struct Problem {
-  std::vector<Tensor> tensors;
-  std::vector<Op> ops;
-  FastMemoryCapacity fast_memory_capacity;
-  SlowMemoryBandwidth slow_memory_bandwidth;
-  Granularity native_granularity;
-  bool operator==(const Problem& other) const = default;
+    std::vector<Tensor> tensors;
+    std::vector<Op> ops;
+    FastMemoryCapacity fast_memory_capacity;
+    SlowMemoryBandwidth slow_memory_bandwidth;
+    Granularity native_granularity;
+    bool operator==(const Problem& other) const = default;
 };
 
 absl::StatusOr<Problem> ReadProblem(const std::string& filename);
 
 struct Subgraph {
-  std::vector<size_t> ops;
-  std::vector<size_t> tensors_to_retain;
-  Granularity granularity;
-  std::optional<TraversalOrder> traversal_order;
-  SubgraphLatency subgraph_latency;
-  bool operator==(const Subgraph& other) const = default;
+    std::vector<size_t> ops;
+    std::vector<size_t> tensors_to_retain;
+    Granularity granularity;
+    std::optional<TraversalOrder> traversal_order;
+    SubgraphLatency subgraph_latency;
+    bool operator==(const Subgraph& other) const = default;
 };
 
 struct Solution {
-  std::vector<Subgraph> subgraphs;
-  bool operator==(const Solution& other) const = default;
+    std::vector<Subgraph> subgraphs;
+    bool operator==(const Solution& other) const = default;
 };
 
 absl::StatusOr<Solution> ReadSolution(const std::string& filename);
 
-absl::StatusOr<TotalLatency> Evaluate(const Problem& problem,
-                                      const Solution& solution);
+absl::StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution);
 
 absl::Status WriteSolution(const Solution& solution, const std::string& filename);
 
-}  // namespace mlsys
+} // namespace mlsys
 
-#endif  // MLSYS_H_
+#endif // MLSYS_H_
