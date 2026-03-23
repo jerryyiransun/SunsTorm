@@ -23,7 +23,8 @@ void ExpectPass(const std::string& input_file, const std::string& output_file) {
     EXPECT_GE(result.value(), 0);
 }
 
-// asserts that evaluating a (problem, solution) pair fails with a message containing `expected_substr`.
+// asserts that evaluating a (problem, solution) pair fails with a message containing
+// `expected_substr`.
 void ExpectFail(const std::string& input_file, const std::string& output_file,
                 const std::string& expected_substr) {
     auto problem = mlsys::ReadProblem(TestDataPath(input_file));
@@ -108,6 +109,89 @@ TEST(EvaluateTest, Example5_Fail_Capacity) {
 
 TEST(EvaluateTest, Example5_OutputB_Pass) {
     ExpectPass("example-5-input.json", "example-5-output-B.json");
+}
+
+TEST(EvaluateTest, RetainedLoadedInput_CountsTowardCapacity) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // lhs
+        {.width = 64, .height = 64}, // rhs
+        {.width = 64, .height = 64}  // out
+    };
+    problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1000}};
+    // Output(64x64) + rhs(64x64) + lhs(64x64 retained) = 12,288 > 10,000
+    problem.fast_memory_capacity = 10'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {0}; // retain loaded input tensor
+    sg.granularity = {.width = 64, .height = 64, .depth = 64};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+    solution.subgraphs = {sg};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Fast Memory Capacity Exceeded]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, RetainedTensor_OutOfRange_Fail) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // in
+        {.width = 64, .height = 64}  // out
+    };
+    problem.ops = {{.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100}};
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {99}; // invalid tensor index
+    sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+    solution.subgraphs = {sg};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Retained Tensor]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, TraversalOrder_LengthMismatch_Fail) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // in
+        {.width = 128, .height = 128}  // out
+    };
+    problem.ops = {{.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100}};
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 1}; // 4 tiles expected
+    sg.traversal_order = mlsys::TraversalOrder{0, 1, 2};      // invalid length
+    sg.subgraph_latency = 1.0;
+    solution.subgraphs = {sg};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Traversal Order]"),
+              std::string::npos)
+        << result.status().message();
 }
 
 } // namespace
