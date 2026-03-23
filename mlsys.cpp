@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -226,15 +227,18 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             Tensor lhs_tensor = problem.tensors[op.inputs[0]];
             Tensor rhs_tensor = problem.tensors[op.inputs[1]];
             Tensor out_tensor = problem.tensors[op.outputs[0]];
-            ASSERT_WITH_CONTEXT(lhs_tensor.width == out_tensor.height,
+            // width corresponds to columns and height corresponds to rows.
+            // MatMul shape rules:
+            // lhs: [out_h x k], rhs: [k x out_w], out: [out_h x out_w].
+            ASSERT_WITH_CONTEXT(lhs_tensor.width == rhs_tensor.height,
                                 "op_index=" << i << ", lhs_width=" << lhs_tensor.width
-                                            << ", out_height=" << out_tensor.height);
-            ASSERT_WITH_CONTEXT(out_tensor.width == lhs_tensor.width,
-                                "op_index=" << i << ", out_width=" << out_tensor.width
-                                            << ", lhs_width=" << lhs_tensor.width);
-            ASSERT_WITH_CONTEXT(out_tensor.height == rhs_tensor.height,
-                                "op_index=" << i << ", out_height=" << out_tensor.height
                                             << ", rhs_height=" << rhs_tensor.height);
+            ASSERT_WITH_CONTEXT(out_tensor.height == lhs_tensor.height,
+                                "op_index=" << i << ", out_height=" << out_tensor.height
+                                            << ", lhs_height=" << lhs_tensor.height);
+            ASSERT_WITH_CONTEXT(out_tensor.width == rhs_tensor.width,
+                                "op_index=" << i << ", out_width=" << out_tensor.width
+                                            << ", rhs_width=" << rhs_tensor.width);
         } else if (op.op_type == "Pointwise") {
             // check all the input and output have same shape
             for (size_t in : op.inputs) {
@@ -248,6 +252,95 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                     "op_index=" << i << ", input_tensor_idx=" << in << ", output_tensor_idx="
                                 << op.outputs[0] << ", input_height=" << problem.tensors[in].height
                                 << ", output_height=" << problem.tensors[op.outputs[0]].height);
+            }
+        }
+    }
+#ifdef DEBUG
+    std::cout << "[DEBUG] All assertions passed\n";
+#endif
+
+    // Validate solution-level fields up-front. Problem-level checks should use assertions;
+    // malformed solutions should return errors.
+    for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
+        const auto& subgraph = solution.subgraphs[sg_idx];
+
+        if (subgraph.granularity.width <= 0 || subgraph.granularity.height <= 0 ||
+            subgraph.granularity.depth <= 0) {
+            return absl::InvalidArgumentError(
+                "[Invalid Granularity] Subgraph granularity dimensions must be positive");
+        }
+
+        std::set<size_t> subgraph_produced;
+        std::set<size_t> subgraph_consumed;
+        for (size_t const op_idx : subgraph.ops) {
+            if (op_idx >= problem.ops.size()) {
+                return absl::InvalidArgumentError(
+                    "[Invalid Op Index] Invalid op index in subgraph");
+            }
+            size_t const out = problem.ops[op_idx].outputs[0];
+            subgraph_produced.insert(out);
+            for (size_t const in : problem.ops[op_idx].inputs) {
+                subgraph_consumed.insert(in);
+            }
+        }
+
+        for (size_t const t_idx : subgraph.tensors_to_retain) {
+            if (t_idx >= problem.tensors.size()) {
+                return absl::InvalidArgumentError(
+                    "[Invalid Retained Tensor] Invalid tensor index in tensors_to_retain");
+            }
+        }
+
+        if (subgraph.traversal_order.has_value()) {
+            std::vector<size_t> final_outputs;
+            final_outputs.reserve(
+                subgraph_produced.size()); // Purely optimization no functional change
+            for (size_t const t_idx : subgraph_produced) {
+                if (!subgraph_consumed.contains(t_idx)) {
+                    final_outputs.push_back(t_idx);
+                }
+            }
+
+            if (final_outputs.empty()) {
+                return absl::InvalidArgumentError(
+                    "[Invalid Traversal Order] Subgraph has no final output for traversal");
+            }
+
+            auto tile_count_for_output = [&](size_t tensor_idx) -> int64_t {
+                int64_t const out_w = problem.tensors[tensor_idx].width;
+                int64_t const out_h = problem.tensors[tensor_idx].height;
+                int64_t const gran_w = subgraph.granularity.width;
+                int64_t const gran_h = subgraph.granularity.height;
+                int64_t const tiles_w = (out_w + gran_w - 1) / gran_w;
+                int64_t const tiles_h = (out_h + gran_h - 1) / gran_h;
+                return tiles_w * tiles_h;
+            };
+
+            int64_t const expected_tiles = tile_count_for_output(final_outputs[0]);
+            for (size_t const out_idx : final_outputs) {
+                if (tile_count_for_output(out_idx) != expected_tiles) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Traversal Order] Inconsistent final output tile counts");
+                }
+            }
+
+            const auto& traversal_order = subgraph.traversal_order.value();
+            if (traversal_order.size() != static_cast<size_t>(expected_tiles)) {
+                return absl::InvalidArgumentError(
+                    "[Invalid Traversal Order] traversal_order length does not match tile count");
+            }
+
+            std::vector<bool> seen(static_cast<size_t>(expected_tiles), false);
+            for (int64_t const tile_idx : traversal_order) {
+                if (tile_idx < 0 || tile_idx >= expected_tiles) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Traversal Order] traversal_order index out of range");
+                }
+                if (seen[static_cast<size_t>(tile_idx)]) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Traversal Order] traversal_order contains duplicates");
+                }
+                seen[static_cast<size_t>(tile_idx)] = true;
             }
         }
     }
@@ -314,6 +407,9 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
         std::vector<std::tuple<size_t, Tensor, bool>> q;
         std::set<size_t> subgraph_produced;
         std::set<size_t> subgraph_consumed;
+        std::set<size_t> to_be_retained_tensors(subgraph.tensors_to_retain.begin(),
+                                                subgraph.tensors_to_retain.end());
+        std::set<size_t> final_output_tensors;
 
         for (size_t const op_idx : subgraph.ops) {
             size_t const out = problem.ops[op_idx].outputs[0];
@@ -324,37 +420,46 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             }
         }
 
-        // Account the final tensors and to be retained tensors
-        for (size_t const t_idx : subgraph_produced) {
-            bool const is_final_output = (!subgraph_consumed.contains(t_idx));
-            bool const is_to_be_retained =
-                (std::count(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(),
-                            t_idx) > 0);
-            bool const not_visited = (!visited_tensors.contains(t_idx));
-
-            if ((is_final_output || is_to_be_retained) && not_visited) {
-                size_t required_size = 0;
-                if (is_final_output) {
-                    // Final output size is the granularity
-                    required_size = subgraph.granularity.width * subgraph.granularity.height;
-                    Tensor tensor;
-                    tensor.width = subgraph.granularity.width;
-                    tensor.height = subgraph.granularity.height;
-                    q.emplace_back(t_idx, tensor, true);
-                } else {
-                    required_size = problem.tensors[t_idx].width * problem.tensors[t_idx].height;
-                    // ignore adding it to the traversal queue if it is not a final output
-                }
+        // Account for tensors retained by this subgraph (can include outputs or loaded inputs).
+        for (size_t const t_idx : to_be_retained_tensors) {
+            if (!visited_tensors.contains(t_idx)) {
+                size_t const required_size =
+                    problem.tensors[t_idx].width * problem.tensors[t_idx].height;
                 fast_memory_usage += required_size;
                 visited_tensors.insert(t_idx);
 
 #ifdef DEBUG
-                std::cout << "[DEBUG] Tensor " << t_idx
-                          << (is_final_output ? " (subgraph output)" : " (to be retained)")
-                          << " takes total space " << required_size
-                          << " | total_mem=" << fast_memory_usage << "\n";
+                std::cout << "[DEBUG] Tensor " << t_idx << " (to be retained) takes "
+                          << required_size << " | total_mem=" << fast_memory_usage << "\n";
 #endif
             }
+        }
+
+        // Account for final outputs and initialize the backward traversal queue.
+        for (size_t const t_idx : subgraph_produced) {
+            bool const is_final_output = (!subgraph_consumed.contains(t_idx));
+            if (!is_final_output) {
+                continue;
+            }
+
+            final_output_tensors.insert(t_idx);
+            if (!visited_tensors.contains(t_idx)) {
+                // Final output working set size is the subgraph granularity tile.
+                size_t const required_size =
+                    subgraph.granularity.width * subgraph.granularity.height;
+                fast_memory_usage += required_size;
+                visited_tensors.insert(t_idx);
+
+#ifdef DEBUG
+                std::cout << "[DEBUG] Tensor " << t_idx << " (subgraph output) takes total space "
+                          << required_size << " | total_mem=" << fast_memory_usage << "\n";
+#endif
+            }
+
+            Tensor tensor;
+            tensor.width = subgraph.granularity.width;
+            tensor.height = subgraph.granularity.height;
+            q.emplace_back(t_idx, tensor, true);
         }
 
         // BFS traversal backwards
@@ -363,6 +468,11 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
         // Each tile loop we will have to load the necessary amount of data into fast memory whether
         // or not it is retained(what we calculate for)
         size_t head = 0;
+        auto is_ignored_tensor_in_backward = [&](size_t tensor_idx) {
+            return final_output_tensors.contains(tensor_idx) ||
+                   to_be_retained_tensors.contains(tensor_idx) ||
+                   prev_retained_tensors.contains(tensor_idx);
+        };
         while (head < q.size()) {
             auto [curr_tensor_idx, curr_tensor_dim, is_final] = q[head++];
 
@@ -408,27 +518,26 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 lhs_tensor.width = inner_k;
                 lhs_tensor.height = curr_tensor_dim.height;
 
-                if (!visited_tensors.contains(lhs_tensor_idx)) {
+                bool const lhs_is_ignored = is_ignored_tensor_in_backward(lhs_tensor_idx) ||
+                                            visited_tensors.contains(lhs_tensor_idx);
+                if (!lhs_is_ignored) {
                     visited_tensors.insert(lhs_tensor_idx);
                     // Any data that is used between operations never touch fast memory
                     bool const lhs_is_ephemeral = (subgraph_produced.contains(
                         lhs_tensor_idx)); // lhs_tensor is already the input of curr tensor
-                    bool const lhs_is_to_be_retained =
-                        (std::count(subgraph.tensors_to_retain.begin(),
-                                    subgraph.tensors_to_retain.end(), lhs_tensor_idx) > 0);
                     bool const lhs_is_retained = (prev_retained_tensors.contains(lhs_tensor_idx));
+                    size_t lhs_added_size = 0;
 
-                    if (!lhs_is_ephemeral && !lhs_is_retained && !lhs_is_to_be_retained) {
-                        fast_memory_usage += lhs_tensor.width * lhs_tensor.height;
+                    if (!lhs_is_ephemeral && !lhs_is_retained) {
+                        lhs_added_size = lhs_tensor.width * lhs_tensor.height;
+                        fast_memory_usage += lhs_added_size;
                     }
 #ifdef DEBUG
                     std::cout << "[DEBUG] MatMul LHS Tensor " << lhs_tensor_idx
-                              << (lhs_is_ephemeral  ? " is EPHEMERAL! Takes 0 bytes"
-                                  : lhs_is_retained ? " is RETAINED! Takes 0 bytes"
-                                  : lhs_is_to_be_retained
-                                      ? " is to be RETAINED! Takes 0 bytes"
-                                      : " takes " +
-                                            std::to_string(lhs_tensor.width * lhs_tensor.height) +
+                              << (lhs_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes"
+                                  : lhs_is_retained
+                                      ? " is RETAINED! Takes 0 bytes"
+                                      : " takes " + std::to_string(lhs_added_size) +
                                             " (req_w=" + std::to_string(lhs_tensor.width) +
                                             " req_h=" + std::to_string(lhs_tensor.height) + ")")
                               << " | total_mem=" << fast_memory_usage << "\n";
@@ -441,27 +550,26 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 rhs_tensor.width = curr_tensor_dim.width;
                 rhs_tensor.height = inner_k;
 
-                if (!visited_tensors.contains(rhs_tensor_idx)) {
+                bool const rhs_is_ignored = is_ignored_tensor_in_backward(rhs_tensor_idx) ||
+                                            visited_tensors.contains(rhs_tensor_idx);
+                if (!rhs_is_ignored) {
                     visited_tensors.insert(rhs_tensor_idx);
                     // Any data that is used between operations never touch fast memory
                     bool const rhs_is_ephemeral = (subgraph_produced.contains(
                         rhs_tensor_idx)); // lhs_tensor is already the input of curr tensor
-                    bool const rhs_is_to_be_retained =
-                        (std::count(subgraph.tensors_to_retain.begin(),
-                                    subgraph.tensors_to_retain.end(), rhs_tensor_idx) > 0);
                     bool const rhs_is_retained = (prev_retained_tensors.contains(rhs_tensor_idx));
+                    size_t rhs_added_size = 0;
 
-                    if (!rhs_is_ephemeral && !rhs_is_retained && !rhs_is_to_be_retained) {
-                        fast_memory_usage += rhs_tensor.width * rhs_tensor.height;
+                    if (!rhs_is_ephemeral && !rhs_is_retained) {
+                        rhs_added_size = rhs_tensor.width * rhs_tensor.height;
+                        fast_memory_usage += rhs_added_size;
                     }
 #ifdef DEBUG
                     std::cout << "[DEBUG] MatMul RHS Tensor " << rhs_tensor_idx
-                              << (rhs_is_ephemeral  ? " is EPHEMERAL! Takes 0 bytes"
-                                  : rhs_is_retained ? " is RETAINED! Takes 0 bytes"
-                                  : rhs_is_to_be_retained
-                                      ? " is to be RETAINED! Takes 0 bytes"
-                                      : " takes " +
-                                            std::to_string(rhs_tensor.width * rhs_tensor.height) +
+                              << (rhs_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes"
+                                  : rhs_is_retained
+                                      ? " is RETAINED! Takes 0 bytes"
+                                      : " takes " + std::to_string(rhs_added_size) +
                                             " (req_w=" + std::to_string(rhs_tensor.width) +
                                             " req_h=" + std::to_string(rhs_tensor.height) + ")")
                               << " | total_mem=" << fast_memory_usage << "\n";
@@ -473,7 +581,9 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 // tensor so we do not need to add any extra space for the input tensor
                 if (op.inputs.size() == 1) {
                     size_t const in_tensor_idx = op.inputs[0];
-                    if (!visited_tensors.contains(in_tensor_idx)) {
+                    bool const in_is_ignored = is_ignored_tensor_in_backward(in_tensor_idx) ||
+                                               visited_tensors.contains(in_tensor_idx);
+                    if (!in_is_ignored) {
                         visited_tensors.insert(in_tensor_idx);
                         // Pointwise inputs do not take extra fast memory space in the tile
                         // calculation
@@ -483,30 +593,28 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                     // Otherwise each of the input needs to be the same w,h size as the output
                     // so we need to add the space for each of the inputs
                     for (size_t const in_tensor_idx : op.inputs) {
-                        if (!visited_tensors.contains(in_tensor_idx)) {
+                        bool const in_is_ignored = is_ignored_tensor_in_backward(in_tensor_idx) ||
+                                                   visited_tensors.contains(in_tensor_idx);
+                        if (!in_is_ignored) {
                             visited_tensors.insert(in_tensor_idx);
 
                             bool const in_is_ephemeral = (subgraph_produced.contains(
                                 in_tensor_idx)); // lhs_tensor is already the input of curr tensor
-                            bool const in_is_to_be_retained =
-                                (std::count(subgraph.tensors_to_retain.begin(),
-                                            subgraph.tensors_to_retain.end(), in_tensor_idx) > 0);
                             bool const in_is_retained =
                                 (prev_retained_tensors.contains(in_tensor_idx));
+                            size_t in_added_size = 0;
 
-                            if (!in_is_ephemeral && !in_is_retained && !in_is_to_be_retained) {
-                                fast_memory_usage += curr_tensor_dim.width * curr_tensor_dim.height;
+                            if (!in_is_ephemeral && !in_is_retained) {
+                                in_added_size = curr_tensor_dim.width * curr_tensor_dim.height;
+                                fast_memory_usage += in_added_size;
                             }
 #ifdef DEBUG
                             std::cout
                                 << "[DEBUG] Pointwise Input Tensor " << in_tensor_idx
-                                << (in_is_ephemeral  ? " is EPHEMERAL! Takes 0 bytes"
-                                    : in_is_retained ? " is RETAINED! Takes 0 bytes"
-                                    : in_is_to_be_retained
-                                        ? " is to be RETAINED! Takes 0 bytes"
-                                        : " takes " +
-                                              std::to_string(curr_tensor_dim.width *
-                                                             curr_tensor_dim.height) +
+                                << (in_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes"
+                                    : in_is_retained
+                                        ? " is RETAINED! Takes 0 bytes"
+                                        : " takes " + std::to_string(in_added_size) +
                                               " (req_w=" + std::to_string(curr_tensor_dim.width) +
                                               " req_h=" + std::to_string(curr_tensor_dim.height) +
                                               ")")
