@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <cstdlib>
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -15,6 +16,25 @@
 using namespace absl;
 using json = nlohmann::json;
 using ordered_json = nlohmann::ordered_json;
+
+#if defined(M_Assert)
+#define ASSERT_WITH_CONTEXT(condition, context_stream)                                  \
+    do {                                                                                 \
+        if (!(condition)) {                                                              \
+            std::cerr << context_stream << std::endl;                                    \
+        }                                                                                \
+        M_Assert(condition);                                                             \
+    } while (0)
+#else
+#define ASSERT_WITH_CONTEXT(condition, context_stream)                                  \
+    do {                                                                                 \
+        if (!(condition)) {                                                              \
+            std::cerr << "Assertion failed: " #condition << "\n" << context_stream   \
+                      << std::endl;                                                      \
+            std::abort();                                                                \
+        }                                                                                \
+    } while (0)
+#endif
 
 namespace mlsys {
 
@@ -168,39 +188,89 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
 }
 
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {
+    #ifdef DEBUG
+    std::cout << "\n[DEBUG] Starting Evaluate Function\n";
+    #endif
     std::vector<bool> inputs_satisfied(problem.tensors.size(), true);
     
     // Use assertions to check the problem is valid
     for (size_t i = 0; i < problem.ops.size(); i++) {
         Op op = problem.ops[i];
-        assert(op.inputs.size() > 0);
-        assert(op.outputs.size() == 1);
-        assert(op.op_type == "MatMul" || op.op_type == "Pointwise");
+        ASSERT_WITH_CONTEXT(
+            op.inputs.size() > 0,
+            "op_index=" << i << ", op_type=" << op.op_type
+                        << ", inputs.size()=" << op.inputs.size());
+        ASSERT_WITH_CONTEXT(
+            op.outputs.size() == 1,
+            "op_index=" << i << ", op_type=" << op.op_type
+                        << ", outputs.size()=" << op.outputs.size());
+        ASSERT_WITH_CONTEXT(
+            op.op_type == "MatMul" || op.op_type == "Pointwise",
+            "op_index=" << i << ", op_type=" << op.op_type);
 
         // Check op tensors exist
         for (size_t in_tensor_idx : op.inputs) {
-            assert(in_tensor_idx < problem.tensors.size());
+            ASSERT_WITH_CONTEXT(
+                in_tensor_idx < problem.tensors.size(),
+                "op_index=" << i << ", op_type=" << op.op_type
+                            << ", input_tensor_idx=" << in_tensor_idx
+                            << ", num_tensors=" << problem.tensors.size());
         }
-        assert(op.outputs[0] < problem.tensors.size());
+        ASSERT_WITH_CONTEXT(
+            op.outputs[0] < problem.tensors.size(),
+            "op_index=" << i << ", op_type=" << op.op_type
+                        << ", output_tensor_idx=" << op.outputs[0]
+                        << ", num_tensors=" << problem.tensors.size());
 
-        // Check operation tesnor size matching
-        if (op.op_type == "matmul") {
-            assert(op.inputs.size() == 2);
+        // Check operation tensor size matching
+        if (op.op_type == "MatMul") {
+            ASSERT_WITH_CONTEXT(
+                op.inputs.size() == 2,
+                "op_index=" << i << ", op_type=" << op.op_type
+                            << ", inputs.size()=" << op.inputs.size()
+                            << ", outputs.size()=" << op.outputs.size());
 
             Tensor lhs_tensor = problem.tensors[op.inputs[0]];
             Tensor rhs_tensor = problem.tensors[op.inputs[1]];
             Tensor out_tensor = problem.tensors[op.outputs[0]];
-            assert(lhs_tensor.width == out_tensor.height);
-            assert(out_tensor.width == lhs_tensor.width);
-            assert(out_tensor.height == rhs_tensor.height);
-        } else if (op.op_type == "pointwise") {
+            ASSERT_WITH_CONTEXT(
+                lhs_tensor.width == out_tensor.height,
+                "op_index=" << i
+                            << ", lhs_width=" << lhs_tensor.width
+                            << ", out_height=" << out_tensor.height);
+            ASSERT_WITH_CONTEXT(
+                out_tensor.width == lhs_tensor.width,
+                "op_index=" << i
+                            << ", out_width=" << out_tensor.width
+                            << ", lhs_width=" << lhs_tensor.width);
+            ASSERT_WITH_CONTEXT(
+                out_tensor.height == rhs_tensor.height,
+                "op_index=" << i
+                            << ", out_height=" << out_tensor.height
+                            << ", rhs_height=" << rhs_tensor.height);
+        } else if (op.op_type == "Pointwise") {
             // check all the input and output have same shape
             for (size_t in : op.inputs) {
-                assert(problem.tensors[in].width == problem.tensors[op.outputs[0]].width);
-                assert(problem.tensors[in].height == problem.tensors[op.outputs[0]].height);
+                ASSERT_WITH_CONTEXT(
+                    problem.tensors[in].width == problem.tensors[op.outputs[0]].width,
+                    "op_index=" << i
+                                << ", input_tensor_idx=" << in
+                                << ", output_tensor_idx=" << op.outputs[0]
+                                << ", input_width=" << problem.tensors[in].width
+                                << ", output_width=" << problem.tensors[op.outputs[0]].width);
+                ASSERT_WITH_CONTEXT(
+                    problem.tensors[in].height == problem.tensors[op.outputs[0]].height,
+                    "op_index=" << i
+                                << ", input_tensor_idx=" << in
+                                << ", output_tensor_idx=" << op.outputs[0]
+                                << ", input_height=" << problem.tensors[in].height
+                                << ", output_height=" << problem.tensors[op.outputs[0]].height);
             }
         }
     }
+    #ifdef DEBUG
+    std::cout << "[DEBUG] All assertions passed\n";
+    #endif
 
     // Identify tensors that are not produced by any op
     std::vector<int> producer_op(problem.tensors.size(), -1);   // producer_op[i] is the index of the op that produces tensor i
