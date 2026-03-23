@@ -1,9 +1,9 @@
+#include "mlsys.h"
+#include "nlohmann/json.hpp"
+#include "solver.h"
 #include <fstream>
 #include <iostream>
 #include <string>
-#include "mlsys.h"
-#include "solver.h"
-#include "nlohmann/json.hpp"
 
 using namespace mlsys;
 
@@ -27,21 +27,22 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     Problem problem = problem_status.value();
-    
-    #ifdef DEBUG
-    std::cout << "***DEBUG*** " << problem.tensors.size() << " tensors and " << problem.ops.size() << " operations loaded.\n";
-    #endif
+
+#ifdef DEBUG
+    std::cout << "***DEBUG*** " << problem.tensors.size() << " tensors and " << problem.ops.size()
+              << " operations loaded.\n";
+#endif
 
     // Scheduling logic
     std::unique_ptr<Solver> solver = std::make_unique<BaseSolver>();
-    auto solution_status = solver->Solve(problem);
+    auto solution_status = solver->solve(problem);
     if (!solution_status.ok()) {
         std::cerr << "Error solving problem: " << solution_status.status().message() << "\n";
         return 1;
     }
     Solution solution = solution_status.value();
 
-    #ifdef DEBUG
+#ifdef DEBUG
     auto eval_status = Evaluate(problem, solution);
     if (eval_status.ok()) {
         std::cout << "Evaluation successful.\n";
@@ -49,7 +50,7 @@ int main(int argc, char* argv[]) {
     } else {
         std::cerr << "Error evaluating solution: " << eval_status.status().message() << "\n";
     }
-    #endif
+#endif
 
     // Write the output
     auto write_status = WriteSolution(solution, output_path);

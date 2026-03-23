@@ -1,0 +1,19 @@
+---
+Checks: readability-*,
+  modernize-*,
+  performance-*,
+  bugprone-*,
+WarningsAsErrors: "bugprone-*, performance-*"
+HeaderFilterRegex: "^((?!_deps).)*$"
+FormatStyle: none
+CheckOptions:
+  - key: readability-identifier-naming.ClassMemberCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.EnumCase
+    value: lower_case
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case

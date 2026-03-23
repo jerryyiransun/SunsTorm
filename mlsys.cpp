@@ -1,44 +1,46 @@
 #include "mlsys.h"
 
-#include <fstream>
-#include <iostream>
-#include <cstdlib>
-#include <algorithm>
-#include <cmath>
-#include <set>
-#include <tuple>
-#include <map>
-#include <vector>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "nlohmann/json.hpp"
+#include "nlohmann/json_fwd.hpp"
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstddef>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <set>
+#include <string>
+#include <tuple>
+#include <vector>
 
 using namespace absl;
 using json = nlohmann::json;
 using ordered_json = nlohmann::ordered_json;
 
 #if defined(M_Assert)
-#define ASSERT_WITH_CONTEXT(condition, context_stream)                                  \
-    do {                                                                                 \
-        if (!(condition)) {                                                              \
-            std::cerr << context_stream << std::endl;                                    \
-        }                                                                                \
-        M_Assert(condition);                                                             \
+#define ASSERT_WITH_CONTEXT(condition, context_stream)                                             \
+    do {                                                                                           \
+        if (!(condition)) {                                                                        \
+            std::cerr << context_stream << std::endl;                                              \
+        }                                                                                          \
+        M_Assert(condition);                                                                       \
     } while (0)
 #else
-#define ASSERT_WITH_CONTEXT(condition, context_stream)                                  \
-    do {                                                                                 \
-        if (!(condition)) {                                                              \
-            std::cerr << "Assertion failed: " #condition << "\n" << context_stream   \
-                      << std::endl;                                                      \
-            std::abort();                                                                \
-        }                                                                                \
+#define ASSERT_WITH_CONTEXT(condition, context_stream)                                             \
+    do {                                                                                           \
+        if (!(condition)) {                                                                        \
+            std::cerr << "Assertion failed: " #condition << "\n" << context_stream << std::endl;   \
+            std::abort();                                                                          \
+        }                                                                                          \
     } while (0)
 #endif
 
 namespace mlsys {
 
-StatusOr<Problem> ReadProblem(const std::string& filename) {
+auto ReadProblem(const std::string& filename) -> StatusOr<Problem> {
     std::ifstream file(filename);
     if (!file.is_open()) {
         return absl::NotFoundError("File not found: " + filename);
@@ -57,16 +59,14 @@ StatusOr<Problem> ReadProblem(const std::string& filename) {
         // Parse Tensors
         const auto& widths = data.at("widths");
         const auto& heights = data.at("heights");
-        
+
         if (widths.size() != heights.size()) {
             return absl::InvalidArgumentError("widths and heights arrays must be the same size");
         }
-        
+
         for (size_t i = 0; i < widths.size(); ++i) {
-            problem.tensors.push_back(Tensor{
-                widths[i].get<Width>(), 
-                heights[i].get<Height>()
-            });
+            problem.tensors.push_back(
+                Tensor{.width = widths[i].get<Width>(), .height = heights[i].get<Height>()});
         }
 
         // Parse Operations
@@ -75,8 +75,7 @@ StatusOr<Problem> ReadProblem(const std::string& filename) {
         const auto& base_costs = data.at("base_costs");
         const auto& op_types = data.at("op_types");
 
-        if (inputs.size() != outputs.size() || 
-            inputs.size() != base_costs.size() || 
+        if (inputs.size() != outputs.size() || inputs.size() != base_costs.size() ||
             inputs.size() != op_types.size()) {
             return absl::InvalidArgumentError("Op arrays must all be the same size");
         }
@@ -94,7 +93,7 @@ StatusOr<Problem> ReadProblem(const std::string& filename) {
         problem.fast_memory_capacity = data.at("fast_memory_capacity").get<FastMemoryCapacity>();
         problem.slow_memory_bandwidth = data.at("slow_memory_bandwidth").get<SlowMemoryBandwidth>();
 
-        // Parse Granularity 
+        // Parse Granularity
         const auto& gran = data.at("native_granularity");
         if (gran.size() >= 2) {
             problem.native_granularity.width = gran[0].get<Width>();
@@ -113,7 +112,7 @@ StatusOr<Problem> ReadProblem(const std::string& filename) {
     return problem;
 }
 
-StatusOr<Solution> ReadSolution(const std::string& filename) {
+auto ReadSolution(const std::string& filename) -> StatusOr<Solution> {
     std::ifstream file(filename);
     if (!file.is_open()) {
         return absl::NotFoundError("File not found: " + filename);
@@ -135,18 +134,18 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
         const auto& tensors_to_retain = data.at("tensors_to_retain");
         const auto& traversal_orders = data.at("traversal_orders");
         const auto& subgraph_latencies = data.at("subgraph_latencies");
-        
+
         // Check all same size
-        if (subgraphs.size() != granularities.size() || 
-            subgraphs.size() != tensors_to_retain.size() || 
-            subgraphs.size() != traversal_orders.size() || 
+        if (subgraphs.size() != granularities.size() ||
+            subgraphs.size() != tensors_to_retain.size() ||
+            subgraphs.size() != traversal_orders.size() ||
             subgraphs.size() != subgraph_latencies.size()) {
             return absl::InvalidArgumentError("Subgraph arrays must all be the same size");
         }
 
         // Check all the subgraph latency are positive
-        for (size_t i = 0; i < subgraph_latencies.size(); i++) {
-            if (subgraph_latencies[i].get<SubgraphLatency>() < 0) {
+        for (const auto& subgraph_latencie : subgraph_latencies) {
+            if (subgraph_latencie.get<SubgraphLatency>() < 0) {
                 return absl::InvalidArgumentError("Subgraph latency must be positive");
             }
         }
@@ -188,95 +187,81 @@ StatusOr<Solution> ReadSolution(const std::string& filename) {
 }
 
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {
-    #ifdef DEBUG
+#ifdef DEBUG
     std::cout << "\n[DEBUG] Starting Evaluate Function\n";
-    #endif
+#endif
     std::vector<bool> inputs_satisfied(problem.tensors.size(), true);
-    
+
     // Use assertions to check the problem is valid
     for (size_t i = 0; i < problem.ops.size(); i++) {
         Op op = problem.ops[i];
-        ASSERT_WITH_CONTEXT(
-            op.inputs.size() > 0,
-            "op_index=" << i << ", op_type=" << op.op_type
-                        << ", inputs.size()=" << op.inputs.size());
-        ASSERT_WITH_CONTEXT(
-            op.outputs.size() == 1,
-            "op_index=" << i << ", op_type=" << op.op_type
-                        << ", outputs.size()=" << op.outputs.size());
-        ASSERT_WITH_CONTEXT(
-            op.op_type == "MatMul" || op.op_type == "Pointwise",
-            "op_index=" << i << ", op_type=" << op.op_type);
+        ASSERT_WITH_CONTEXT(op.inputs.size() > 0,
+                            "op_index=" << i << ", op_type=" << op.op_type
+                                        << ", inputs.size()=" << op.inputs.size());
+        ASSERT_WITH_CONTEXT(op.outputs.size() == 1,
+                            "op_index=" << i << ", op_type=" << op.op_type
+                                        << ", outputs.size()=" << op.outputs.size());
+        ASSERT_WITH_CONTEXT(op.op_type == "MatMul" || op.op_type == "Pointwise",
+                            "op_index=" << i << ", op_type=" << op.op_type);
 
         // Check op tensors exist
         for (size_t in_tensor_idx : op.inputs) {
-            ASSERT_WITH_CONTEXT(
-                in_tensor_idx < problem.tensors.size(),
-                "op_index=" << i << ", op_type=" << op.op_type
-                            << ", input_tensor_idx=" << in_tensor_idx
-                            << ", num_tensors=" << problem.tensors.size());
+            ASSERT_WITH_CONTEXT(in_tensor_idx < problem.tensors.size(),
+                                "op_index=" << i << ", op_type=" << op.op_type
+                                            << ", input_tensor_idx=" << in_tensor_idx
+                                            << ", num_tensors=" << problem.tensors.size());
         }
-        ASSERT_WITH_CONTEXT(
-            op.outputs[0] < problem.tensors.size(),
-            "op_index=" << i << ", op_type=" << op.op_type
-                        << ", output_tensor_idx=" << op.outputs[0]
-                        << ", num_tensors=" << problem.tensors.size());
+        ASSERT_WITH_CONTEXT(op.outputs[0] < problem.tensors.size(),
+                            "op_index=" << i << ", op_type=" << op.op_type
+                                        << ", output_tensor_idx=" << op.outputs[0]
+                                        << ", num_tensors=" << problem.tensors.size());
 
         // Check operation tensor size matching
         if (op.op_type == "MatMul") {
-            ASSERT_WITH_CONTEXT(
-                op.inputs.size() == 2,
-                "op_index=" << i << ", op_type=" << op.op_type
-                            << ", inputs.size()=" << op.inputs.size()
-                            << ", outputs.size()=" << op.outputs.size());
+            ASSERT_WITH_CONTEXT(op.inputs.size() == 2,
+                                "op_index=" << i << ", op_type=" << op.op_type
+                                            << ", inputs.size()=" << op.inputs.size()
+                                            << ", outputs.size()=" << op.outputs.size());
 
             Tensor lhs_tensor = problem.tensors[op.inputs[0]];
             Tensor rhs_tensor = problem.tensors[op.inputs[1]];
             Tensor out_tensor = problem.tensors[op.outputs[0]];
-            ASSERT_WITH_CONTEXT(
-                lhs_tensor.width == out_tensor.height,
-                "op_index=" << i
-                            << ", lhs_width=" << lhs_tensor.width
-                            << ", out_height=" << out_tensor.height);
-            ASSERT_WITH_CONTEXT(
-                out_tensor.width == lhs_tensor.width,
-                "op_index=" << i
-                            << ", out_width=" << out_tensor.width
-                            << ", lhs_width=" << lhs_tensor.width);
-            ASSERT_WITH_CONTEXT(
-                out_tensor.height == rhs_tensor.height,
-                "op_index=" << i
-                            << ", out_height=" << out_tensor.height
-                            << ", rhs_height=" << rhs_tensor.height);
+            ASSERT_WITH_CONTEXT(lhs_tensor.width == out_tensor.height,
+                                "op_index=" << i << ", lhs_width=" << lhs_tensor.width
+                                            << ", out_height=" << out_tensor.height);
+            ASSERT_WITH_CONTEXT(out_tensor.width == lhs_tensor.width,
+                                "op_index=" << i << ", out_width=" << out_tensor.width
+                                            << ", lhs_width=" << lhs_tensor.width);
+            ASSERT_WITH_CONTEXT(out_tensor.height == rhs_tensor.height,
+                                "op_index=" << i << ", out_height=" << out_tensor.height
+                                            << ", rhs_height=" << rhs_tensor.height);
         } else if (op.op_type == "Pointwise") {
             // check all the input and output have same shape
             for (size_t in : op.inputs) {
                 ASSERT_WITH_CONTEXT(
                     problem.tensors[in].width == problem.tensors[op.outputs[0]].width,
-                    "op_index=" << i
-                                << ", input_tensor_idx=" << in
-                                << ", output_tensor_idx=" << op.outputs[0]
-                                << ", input_width=" << problem.tensors[in].width
+                    "op_index=" << i << ", input_tensor_idx=" << in << ", output_tensor_idx="
+                                << op.outputs[0] << ", input_width=" << problem.tensors[in].width
                                 << ", output_width=" << problem.tensors[op.outputs[0]].width);
                 ASSERT_WITH_CONTEXT(
                     problem.tensors[in].height == problem.tensors[op.outputs[0]].height,
-                    "op_index=" << i
-                                << ", input_tensor_idx=" << in
-                                << ", output_tensor_idx=" << op.outputs[0]
-                                << ", input_height=" << problem.tensors[in].height
+                    "op_index=" << i << ", input_tensor_idx=" << in << ", output_tensor_idx="
+                                << op.outputs[0] << ", input_height=" << problem.tensors[in].height
                                 << ", output_height=" << problem.tensors[op.outputs[0]].height);
             }
         }
     }
-    #ifdef DEBUG
+#ifdef DEBUG
     std::cout << "[DEBUG] All assertions passed\n";
-    #endif
+#endif
 
     // Identify tensors that are not produced by any op
-    std::vector<int> producer_op(problem.tensors.size(), -1);   // producer_op[i] is the index of the op that produces tensor i
+    std::vector<int> producer_op(
+        problem.tensors.size(), -1); // producer_op[i] is the index of the op that produces tensor i
     for (size_t i = 0; i < problem.ops.size(); ++i) {
-        size_t out = problem.ops[i].outputs[0];
-        inputs_satisfied[out] = false;  // if the tensor is an output then it does not have its inputs satisfied before any operations are complete
+        size_t const out = problem.ops[i].outputs[0];
+        inputs_satisfied[out] = false; // if the tensor is an output then it does not have its
+                                       // inputs satisfied before any operations are complete
         producer_op[out] = i;
     }
 
@@ -285,71 +270,77 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 
     for (size_t i = 0; i < solution.subgraphs.size(); ++i) {
         const auto& subgraph = solution.subgraphs[i];
-        
+
         // --- Dependency Check ---
-        for (size_t op_idx : subgraph.ops) {
+        for (size_t const op_idx : subgraph.ops) {
             if (op_idx >= problem.ops.size()) {
-                return absl::InvalidArgumentError("[Invalid Op Index] Invalid op index in subgraph");
+                return absl::InvalidArgumentError(
+                    "[Invalid Op Index] Invalid op index in subgraph");
             }
-            
-            for (size_t in : problem.ops[op_idx].inputs) {
+
+            for (size_t const in : problem.ops[op_idx].inputs) {
                 if (!inputs_satisfied[in]) {
-                    return absl::FailedPreconditionError("[Unmet Dependency] Dependency not met for tensor " + std::to_string(in));
+                    return absl::FailedPreconditionError(
+                        "[Unmet Dependency] Dependency not met for tensor " + std::to_string(in));
                 }
             }
-            
-            size_t out = problem.ops[op_idx].outputs[0];
+
+            size_t const out = problem.ops[op_idx].outputs[0];
             inputs_satisfied[out] = true;
         }
-        
+
         // --- Fast Memory Capacity Check ---
         FastMemoryCapacity fast_memory_usage = 0;
-        std::set<size_t> visited_tensors; 
-        
-        #ifdef DEBUG
+        std::set<size_t> visited_tensors;
+
+#ifdef DEBUG
         std::cout << "\n[DEBUG] Subgraph " << i << " Fast Memory Capacity Check ---\n";
-        #endif
+#endif
 
         // Account for tensors retained from previous subgraph
         // Note: We assume tensors that are retained must be retained in the subgraph until the end
-        for (size_t t : prev_retained_tensors) {
+        for (size_t const t : prev_retained_tensors) {
             fast_memory_usage += problem.tensors[t].width * problem.tensors[t].height;
             visited_tensors.insert(t);
-            #ifdef DEBUG
-            std::cout << "[DEBUG] Tensor " << t << " (retained) takes " << problem.tensors[t].width * problem.tensors[t].height 
+#ifdef DEBUG
+            std::cout << "[DEBUG] Tensor " << t << " (retained) takes "
+                      << problem.tensors[t].width * problem.tensors[t].height
                       << " | total_mem=" << fast_memory_usage << "\n";
-            #endif
+#endif
         }
-        
-        // Queue of tensors to process in the form of (tensor_id, required_width, required_height, is_final_output_or_retained)
+
+        // Queue of tensors to process in the form of (tensor_id, required_width, required_height,
+        // is_final_output_or_retained)
         std::vector<std::tuple<size_t, Tensor, bool>> q;
         std::set<size_t> subgraph_produced;
         std::set<size_t> subgraph_consumed;
-        
-        for (size_t op_idx : subgraph.ops) {
-            size_t out = problem.ops[op_idx].outputs[0];
+
+        for (size_t const op_idx : subgraph.ops) {
+            size_t const out = problem.ops[op_idx].outputs[0];
             subgraph_produced.insert(out);
 
-            for (size_t in : problem.ops[op_idx].inputs) {
+            for (size_t const in : problem.ops[op_idx].inputs) {
                 subgraph_consumed.insert(in);
             }
         }
-        
+
         // Account the final tensors and to be retained tensors
-        for (size_t t_idx : subgraph_produced) {
-            bool is_final_output = (!subgraph_consumed.contains(t_idx));
-            bool is_to_be_retained = (std::count(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(), t_idx) > 0);
-            bool not_visited = (!visited_tensors.contains(t_idx));
-            
+        for (size_t const t_idx : subgraph_produced) {
+            bool const is_final_output = (!subgraph_consumed.contains(t_idx));
+            bool const is_to_be_retained =
+                (std::count(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(),
+                            t_idx) > 0);
+            bool const not_visited = (!visited_tensors.contains(t_idx));
+
             if ((is_final_output || is_to_be_retained) && not_visited) {
-                size_t required_size;
+                size_t required_size = 0;
                 if (is_final_output) {
                     // Final output size is the granularity
                     required_size = subgraph.granularity.width * subgraph.granularity.height;
                     Tensor tensor;
                     tensor.width = subgraph.granularity.width;
                     tensor.height = subgraph.granularity.height;
-                    q.push_back({t_idx, tensor, true});
+                    q.emplace_back(t_idx, tensor, true);
                 } else {
                     required_size = problem.tensors[t_idx].width * problem.tensors[t_idx].height;
                     // ignore adding it to the traversal queue if it is not a final output
@@ -357,181 +348,211 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                 fast_memory_usage += required_size;
                 visited_tensors.insert(t_idx);
 
-                #ifdef DEBUG
-                std::cout << "[DEBUG] Tensor " << t_idx 
+#ifdef DEBUG
+                std::cout << "[DEBUG] Tensor " << t_idx
                           << (is_final_output ? " (subgraph output)" : " (to be retained)")
-                          << " takes total space " << required_size 
+                          << " takes total space " << required_size
                           << " | total_mem=" << fast_memory_usage << "\n";
-                #endif
+#endif
             }
         }
 
         // BFS traversal backwards
 
         // Assumption: We do not need to be as granular as verifying overlapping spatial
-        // Each tile loop we will have to load the necessary amount of data into fast memory whether or not it is retained(what we calculate for)
+        // Each tile loop we will have to load the necessary amount of data into fast memory whether
+        // or not it is retained(what we calculate for)
         size_t head = 0;
         while (head < q.size()) {
             auto [curr_tensor_idx, curr_tensor_dim, is_final] = q[head++];
 
-            int op_idx = producer_op[curr_tensor_idx];
-            
-            // If the tensor has no producer op (it's a global input), 
+            int const op_idx = producer_op[curr_tensor_idx];
+
+            // If the tensor has no producer op (it's a global input),
             // we don't need to trace its dependencies further in this subgraph pass
             if (op_idx == -1) {
-                #ifdef DEBUG
-                std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx << " req_w=" << curr_tensor_dim.width << " req_h=" << curr_tensor_dim.height 
-                          << " is_final=" << is_final << " from OP -1 (Global Input)\n";
-                #endif
+#ifdef DEBUG
+                std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx
+                          << " req_w=" << curr_tensor_dim.width
+                          << " req_h=" << curr_tensor_dim.height << " is_final=" << is_final
+                          << " from OP -1 (Global Input)\n";
+#endif
                 continue;
             }
 
             const Op& op = problem.ops[op_idx];
-            
-            #ifdef DEBUG
-            std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx << " req_w=" << curr_tensor_dim.width << " req_h=" << curr_tensor_dim.height 
-                      << " is_final=" << is_final << " from OP " << op_idx << "\n";
-            #endif
-            
-            
-            if (op.op_type == "MatMul") {
-                size_t lhs_tensor_idx = op.inputs[0];
-                size_t rhs_tensor_idx = op.inputs[1];
 
-                int inner_k;
+#ifdef DEBUG
+            std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx
+                      << " req_w=" << curr_tensor_dim.width << " req_h=" << curr_tensor_dim.height
+                      << " is_final=" << is_final << " from OP " << op_idx << "\n";
+#endif
+
+            if (op.op_type == "MatMul") {
+                size_t const lhs_tensor_idx = op.inputs[0];
+                size_t const rhs_tensor_idx = op.inputs[1];
+
+                int inner_k = 0;
                 if (is_final) {
                     inner_k = subgraph.granularity.depth;
                 } else {
                     inner_k = problem.tensors[lhs_tensor_idx].width;
                 }
-                
-                #ifdef DEBUG
+
+#ifdef DEBUG
                 std::cout << "[DEBUG] MatMul OP " << op_idx << " uses inner_k=" << inner_k << "\n";
-                #endif
+#endif
 
                 // Process LHS
                 Tensor lhs_tensor;
                 lhs_tensor.width = inner_k;
                 lhs_tensor.height = curr_tensor_dim.height;
-                
+
                 if (!visited_tensors.contains(lhs_tensor_idx)) {
                     visited_tensors.insert(lhs_tensor_idx);
                     // Any data that is used between operations never touch fast memory
-                    bool lhs_is_ephemeral = (subgraph_produced.contains(lhs_tensor_idx));  // lhs_tensor is already the input of curr tensor
-                    bool lhs_is_to_be_retained = (std::count(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(), lhs_tensor_idx) > 0);
-                    bool lhs_is_retained =  (prev_retained_tensors.contains(lhs_tensor_idx));
-                    
+                    bool const lhs_is_ephemeral = (subgraph_produced.contains(
+                        lhs_tensor_idx)); // lhs_tensor is already the input of curr tensor
+                    bool const lhs_is_to_be_retained =
+                        (std::count(subgraph.tensors_to_retain.begin(),
+                                    subgraph.tensors_to_retain.end(), lhs_tensor_idx) > 0);
+                    bool const lhs_is_retained = (prev_retained_tensors.contains(lhs_tensor_idx));
+
                     if (!lhs_is_ephemeral && !lhs_is_retained && !lhs_is_to_be_retained) {
                         fast_memory_usage += lhs_tensor.width * lhs_tensor.height;
                     }
-                    #ifdef DEBUG
+#ifdef DEBUG
                     std::cout << "[DEBUG] MatMul LHS Tensor " << lhs_tensor_idx
-                            << (lhs_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes" 
-                                : lhs_is_retained ? " is RETAINED! Takes 0 bytes"
-                                : lhs_is_to_be_retained ? " is to be RETAINED! Takes 0 bytes"
-                                : " takes " + std::to_string(lhs_tensor.width * lhs_tensor.height) 
-                                    + " (req_w=" + std::to_string(lhs_tensor.width) + " req_h=" + std::to_string(lhs_tensor.height) + ")")
-                            << " | total_mem=" << fast_memory_usage << "\n";
-                    #endif
-                    q.push_back({lhs_tensor_idx, lhs_tensor, false});
+                              << (lhs_is_ephemeral  ? " is EPHEMERAL! Takes 0 bytes"
+                                  : lhs_is_retained ? " is RETAINED! Takes 0 bytes"
+                                  : lhs_is_to_be_retained
+                                      ? " is to be RETAINED! Takes 0 bytes"
+                                      : " takes " +
+                                            std::to_string(lhs_tensor.width * lhs_tensor.height) +
+                                            " (req_w=" + std::to_string(lhs_tensor.width) +
+                                            " req_h=" + std::to_string(lhs_tensor.height) + ")")
+                              << " | total_mem=" << fast_memory_usage << "\n";
+#endif
+                    q.emplace_back(lhs_tensor_idx, lhs_tensor, false);
                 }
-                
+
                 // Process RHS
                 Tensor rhs_tensor;
                 rhs_tensor.width = curr_tensor_dim.width;
                 rhs_tensor.height = inner_k;
-                
+
                 if (!visited_tensors.contains(rhs_tensor_idx)) {
                     visited_tensors.insert(rhs_tensor_idx);
                     // Any data that is used between operations never touch fast memory
-                    bool rhs_is_ephemeral = (subgraph_produced.contains(rhs_tensor_idx));   // lhs_tensor is already the input of curr tensor
-                    bool rhs_is_to_be_retained = (std::count(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(), rhs_tensor_idx) > 0);
-                    bool rhs_is_retained =  (prev_retained_tensors.contains(rhs_tensor_idx));
+                    bool const rhs_is_ephemeral = (subgraph_produced.contains(
+                        rhs_tensor_idx)); // lhs_tensor is already the input of curr tensor
+                    bool const rhs_is_to_be_retained =
+                        (std::count(subgraph.tensors_to_retain.begin(),
+                                    subgraph.tensors_to_retain.end(), rhs_tensor_idx) > 0);
+                    bool const rhs_is_retained = (prev_retained_tensors.contains(rhs_tensor_idx));
 
                     if (!rhs_is_ephemeral && !rhs_is_retained && !rhs_is_to_be_retained) {
                         fast_memory_usage += rhs_tensor.width * rhs_tensor.height;
                     }
-                    #ifdef DEBUG
+#ifdef DEBUG
                     std::cout << "[DEBUG] MatMul RHS Tensor " << rhs_tensor_idx
-                            << (rhs_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes"
-                                : rhs_is_retained ? " is RETAINED! Takes 0 bytes"
-                                : rhs_is_to_be_retained ? " is to be RETAINED! Takes 0 bytes"
-                                : " takes " + std::to_string(rhs_tensor.width * rhs_tensor.height)
-                                    + " (req_w=" + std::to_string(rhs_tensor.width) + " req_h=" + std::to_string(rhs_tensor.height) + ")")
-                            << " | total_mem=" << fast_memory_usage << "\n";
-                    #endif
-                    q.push_back({rhs_tensor_idx, rhs_tensor, false});
+                              << (rhs_is_ephemeral  ? " is EPHEMERAL! Takes 0 bytes"
+                                  : rhs_is_retained ? " is RETAINED! Takes 0 bytes"
+                                  : rhs_is_to_be_retained
+                                      ? " is to be RETAINED! Takes 0 bytes"
+                                      : " takes " +
+                                            std::to_string(rhs_tensor.width * rhs_tensor.height) +
+                                            " (req_w=" + std::to_string(rhs_tensor.width) +
+                                            " req_h=" + std::to_string(rhs_tensor.height) + ")")
+                              << " | total_mem=" << fast_memory_usage << "\n";
+#endif
+                    q.emplace_back(rhs_tensor_idx, rhs_tensor, false);
                 }
             } else if (op.op_type == "Pointwise") {
-                // When there is only 1 input the input tensor shares the same space as the output tensor
-                // so we do not need to add any extra space for the input tensor
+                // When there is only 1 input the input tensor shares the same space as the output
+                // tensor so we do not need to add any extra space for the input tensor
                 if (op.inputs.size() == 1) {
-                    size_t in_tensor_idx = op.inputs[0];
+                    size_t const in_tensor_idx = op.inputs[0];
                     if (!visited_tensors.contains(in_tensor_idx)) {
                         visited_tensors.insert(in_tensor_idx);
-                        // Pointwise inputs do not take extra fast memory space in the tile calculation
-                        q.push_back({in_tensor_idx, curr_tensor_dim, false});
+                        // Pointwise inputs do not take extra fast memory space in the tile
+                        // calculation
+                        q.emplace_back(in_tensor_idx, curr_tensor_dim, false);
                     }
                 } else {
                     // Otherwise each of the input needs to be the same w,h size as the output
                     // so we need to add the space for each of the inputs
-                    for (size_t in_tensor_idx : op.inputs) {
+                    for (size_t const in_tensor_idx : op.inputs) {
                         if (!visited_tensors.contains(in_tensor_idx)) {
                             visited_tensors.insert(in_tensor_idx);
 
-                            bool in_is_ephemeral = (subgraph_produced.contains(in_tensor_idx));   // lhs_tensor is already the input of curr tensor
-                            bool in_is_to_be_retained = (std::count(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(), in_tensor_idx) > 0);
-                            bool in_is_retained =  (prev_retained_tensors.contains(in_tensor_idx));
+                            bool const in_is_ephemeral = (subgraph_produced.contains(
+                                in_tensor_idx)); // lhs_tensor is already the input of curr tensor
+                            bool const in_is_to_be_retained =
+                                (std::count(subgraph.tensors_to_retain.begin(),
+                                            subgraph.tensors_to_retain.end(), in_tensor_idx) > 0);
+                            bool const in_is_retained =
+                                (prev_retained_tensors.contains(in_tensor_idx));
 
                             if (!in_is_ephemeral && !in_is_retained && !in_is_to_be_retained) {
                                 fast_memory_usage += curr_tensor_dim.width * curr_tensor_dim.height;
                             }
-                            #ifdef DEBUG
-                            std::cout << "[DEBUG] Pointwise Input Tensor " << in_tensor_idx
-                                      << (in_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes"
-                                          : in_is_retained ? " is RETAINED! Takes 0 bytes"
-                                          : in_is_to_be_retained ? " is to be RETAINED! Takes 0 bytes"
-                                          : " takes " + std::to_string(curr_tensor_dim.width * curr_tensor_dim.height)
-                                            + " (req_w=" + std::to_string(curr_tensor_dim.width) + " req_h=" + std::to_string(curr_tensor_dim.height) + ")")
-                                      << " | total_mem=" << fast_memory_usage << "\n";
-                            #endif
-                            q.push_back({in_tensor_idx, curr_tensor_dim, false});
+#ifdef DEBUG
+                            std::cout
+                                << "[DEBUG] Pointwise Input Tensor " << in_tensor_idx
+                                << (in_is_ephemeral  ? " is EPHEMERAL! Takes 0 bytes"
+                                    : in_is_retained ? " is RETAINED! Takes 0 bytes"
+                                    : in_is_to_be_retained
+                                        ? " is to be RETAINED! Takes 0 bytes"
+                                        : " takes " +
+                                              std::to_string(curr_tensor_dim.width *
+                                                             curr_tensor_dim.height) +
+                                              " (req_w=" + std::to_string(curr_tensor_dim.width) +
+                                              " req_h=" + std::to_string(curr_tensor_dim.height) +
+                                              ")")
+                                << " | total_mem=" << fast_memory_usage << "\n";
+#endif
+                            q.emplace_back(in_tensor_idx, curr_tensor_dim, false);
                         }
                     }
                 }
             }
         }
-        
-        #ifdef DEBUG
-        std::cout << "[DEBUG] Subgraph " << i << " Fast Memory Total: " << fast_memory_usage << " / " << problem.fast_memory_capacity << "\n";
-        #endif
+
+#ifdef DEBUG
+        std::cout << "[DEBUG] Subgraph " << i << " Fast Memory Total: " << fast_memory_usage
+                  << " / " << problem.fast_memory_capacity << "\n";
+#endif
         if (fast_memory_usage > problem.fast_memory_capacity) {
-            return absl::ResourceExhaustedError("[Fast Memory Capacity Exceeded] Fast memory capacity exceeded in subgraph " + std::to_string(i));
+            return absl::ResourceExhaustedError(
+                "[Fast Memory Capacity Exceeded] Fast memory capacity exceeded in subgraph " +
+                std::to_string(i));
         }
-        
+
         // --- Total Latency ---
         total_latency += subgraph.subgraph_latency;
-        
+
         // Update retained tensors for next subgraph
         prev_retained_tensors.clear();
-        for (size_t t : subgraph.tensors_to_retain) {
+        for (size_t const t : subgraph.tensors_to_retain) {
             prev_retained_tensors.insert(t);
         }
     }
-    
+
     // --- All Operations Done Check ---
     for (size_t i = 0; i < problem.tensors.size(); ++i) {
         if (!inputs_satisfied[i]) {
-            return absl::FailedPreconditionError("[Missed Output] Output " + std::to_string(i) + " was not produced");
+            return absl::FailedPreconditionError("[Missed Output] Output " + std::to_string(i) +
+                                                 " was not produced");
         }
     }
 
     return total_latency;
 }
 
-Status WriteSolution(const Solution& solution, const std::string& filename) {
+auto WriteSolution(const Solution& solution, const std::string& filename) -> Status {
     ordered_json j;
-    
+
     j["subgraphs"] = ordered_json::array();
     j["granularities"] = ordered_json::array();
     j["tensors_to_retain"] = ordered_json::array();
@@ -540,19 +561,16 @@ Status WriteSolution(const Solution& solution, const std::string& filename) {
 
     for (const auto& sg : solution.subgraphs) {
         j["subgraphs"].push_back(sg.ops);
-        j["granularities"].push_back({
-            sg.granularity.width, 
-            sg.granularity.height, 
-            sg.granularity.depth
-        });
+        j["granularities"].push_back(
+            {sg.granularity.width, sg.granularity.height, sg.granularity.depth});
         j["tensors_to_retain"].push_back(sg.tensors_to_retain);
-        
+
         if (sg.traversal_order.has_value()) {
             j["traversal_orders"].push_back(sg.traversal_order.value());
         } else {
             j["traversal_orders"].push_back(nullptr);
         }
-        
+
         j["subgraph_latencies"].push_back(sg.subgraph_latency);
     }
 
@@ -561,11 +579,11 @@ Status WriteSolution(const Solution& solution, const std::string& filename) {
     if (!out_file.is_open()) {
         return absl::NotFoundError("Failed to open output file: " + filename);
     }
-    
-    out_file << j.dump(2) << std::endl;
+
+    out_file << j.dump(2) << '\n';
     out_file.close();
 
     return absl::OkStatus();
 }
 
-}  // namespace mlsys
+} // namespace mlsys

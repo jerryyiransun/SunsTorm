@@ -7,6 +7,7 @@ This repository contains our C++ scheduling algorithm for Track A of the MLSys 2
 
 - **CMake** (Version 3.14 or higher)
 - **C++ Compiler** supporting C++17
+- **clang-format** (for pre-commit formatting)
 
 ## How to Build
 
@@ -31,3 +32,23 @@ cmake --build build
 # example
 ./build/mlsys benchmarks/mlsys-2026-1.json out.json
 ```
+
+## Git Hooks (clang-format pre-commit)
+
+This repository includes a versioned pre-commit hook at `.githooks/pre-commit`
+that auto-formats staged `*.cpp`, `*.h`, and `*.hpp` files using `.clang-format`.
+
+Run this once per clone from the project root:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Optional verification:
+
+```bash
+ls .githooks
+```
+
+Then make a small commit. The hook will format staged C/C++ files and re-stage
+them automatically before commit.
