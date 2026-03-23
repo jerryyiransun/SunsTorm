@@ -134,14 +134,8 @@ auto BruteForceSolver::solve(const Problem& problem) -> absl::StatusOr<Solution>
 
     for (const auto& plan : fusion_plans.value()) {
         auto tiled_plan = tiler->tile(problem, plan);
-        if (!tiled_plan.ok()) {
-            return tiled_plan.status();
-        }
 
         auto solu = cost_model->estimate(problem, tiled_plan.value());
-        if (!solu.ok()) {
-            return solu.status();
-        }
 
         if (optimal_plan == tuple<Solution, SubgraphLatency>() ||
             get<1>(solu.value()) < get<1>(optimal_plan)) {
