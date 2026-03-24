@@ -16,33 +16,59 @@ namespace mlsys {
 
 namespace {
 
+// Group tiles by tensor id so we can compute union areas tensor-by-tensor.
 using TilesByTensor = std::unordered_map<size_t, std::vector<Tile>>;
 
 struct SubgraphMeta {
+    // Ops that belong to the current subgraph (for quick membership checks).
     std::set<size_t> op_set;
+
+    // Tensors produced by any op in the subgraph.
     std::set<size_t> produced;
+    // Tensors consumed by any op in the subgraph.
     std::set<size_t> consumed;
+
+    // Produced tensors not consumed again inside this subgraph.
+    // These are the subgraph's logical outputs for tile traversal.
     std::set<size_t> final_outputs;
+
+    // Tensors consumed in this subgraph but produced outside it.
     std::set<size_t> boundary_inputs;
+    // Tensors produced in this subgraph and needed outside it (or final graph outputs).
     std::set<size_t> boundary_outputs;
+
+    // Produced+consumed fully inside the same subgraph with no external visibility.
+    // These are ephemeral: compute dependencies only, no slow-memory traffic accounting.
     std::set<size_t> ephemeral_tensors;
 };
 
 struct OpStepRequirement {
+    // Output tiles of this op required in the current execution step.
     std::vector<Tile> output_tiles;
+
+    // Required reduction depth for this step.
+    // Pointwise => 1
+    // MatMul final-output path => current k chunk
+    // MatMul intermediate path => full K
     int64_t req_k = 1;
 };
 
 struct StepRequirements {
+    // Boundary input tiles needed by this step.
     TilesByTensor required_boundary_inputs;
+    // Boundary output tiles produced by this step.
     TilesByTensor required_boundary_outputs;
+
+    // Per-op compute footprint used to derive step arithmetic time.
     std::unordered_map<size_t, OpStepRequirement> op_requirements;
 };
 
+// Integer ceil(a / b) for positive dimensions in this model.
 auto CeilDiv(int64_t a, int64_t b) -> int64_t {
     return (a + b - 1) / b;
 }
 
+// Adds a tile into a tensor-indexed tile map if tile has non-zero area.
 void AddTile(TilesByTensor& map, const Tile& tile) {
     if (tile.area() <= 0) {
         return;
@@ -50,6 +76,7 @@ void AddTile(TilesByTensor& map, const Tile& tile) {
     map[tile.tensor_idx].push_back(tile);
 }
 
+// Appends all tile lists from src into dst (same tensor ids are concatenated).
 void AddTiles(TilesByTensor& dst, const TilesByTensor& src) {
     for (const auto& [tensor_idx, tiles] : src) {
         auto& out = dst[tensor_idx];
@@ -57,6 +84,7 @@ void AddTiles(TilesByTensor& dst, const TilesByTensor& src) {
     }
 }
 
+// Clamps tile coordinates to valid tensor bounds and keeps half-open semantics.
 auto ClipTileToTensor(const Problem& problem, Tile tile) -> Tile {
     const Tensor& t = problem.tensors[tile.tensor_idx];
 
@@ -75,6 +103,7 @@ auto ClipTileToTensor(const Problem& problem, Tile tile) -> Tile {
     return tile;
 }
 
+// Flattens a tensor-indexed tile map into a single vector.
 auto FlattenTiles(const TilesByTensor& map) -> std::vector<Tile> {
     std::vector<Tile> out;
     for (const auto& [_, tiles] : map) {
@@ -83,10 +112,13 @@ auto FlattenTiles(const TilesByTensor& map) -> std::vector<Tile> {
     return out;
 }
 
+// Computes union area of every tile in the map.
 auto ComputeMapArea(const TilesByTensor& map) -> int64_t {
     return Tile::ComputeNonOverlappingArea(FlattenTiles(map));
 }
 
+// Computes how much additional area must be fetched for `required` given `resident`.
+// For each tensor, this is: union(required ∪ resident) - union(resident).
 auto ComputeMissingArea(const TilesByTensor& required, const TilesByTensor& resident) -> int64_t {
     int64_t missing = 0;
 
@@ -109,6 +141,7 @@ auto ComputeMissingArea(const TilesByTensor& required, const TilesByTensor& resi
     return missing;
 }
 
+// Builds tensor -> producer op index map (-1 for graph inputs).
 auto BuildProducerMap(const Problem& problem) -> std::vector<int> {
     std::vector<int> producer(problem.tensors.size(), -1);
     for (size_t op_idx = 0; op_idx < problem.ops.size(); ++op_idx) {
@@ -117,6 +150,7 @@ auto BuildProducerMap(const Problem& problem) -> std::vector<int> {
     return producer;
 }
 
+// Builds tensor -> list of consumer op indices map.
 auto BuildConsumersMap(const Problem& problem) -> std::vector<std::vector<size_t>> {
     std::vector<std::vector<size_t>> consumers(problem.tensors.size());
     for (size_t op_idx = 0; op_idx < problem.ops.size(); ++op_idx) {
@@ -127,11 +161,13 @@ auto BuildConsumersMap(const Problem& problem) -> std::vector<std::vector<size_t
     return consumers;
 }
 
+// Derives subgraph-local tensor role classification used by the estimator.
 auto BuildSubgraphMeta(const Problem& problem, const Subgraph& subgraph,
                        const std::vector<std::vector<size_t>>& consumers_by_tensor)
     -> SubgraphMeta {
     SubgraphMeta meta;
 
+    // Gather produced/consumed sets and op membership.
     for (size_t op_idx : subgraph.ops) {
         meta.op_set.insert(op_idx);
 
@@ -143,18 +179,21 @@ auto BuildSubgraphMeta(const Problem& problem, const Subgraph& subgraph,
         }
     }
 
+    // Final outputs are produced tensors not consumed again in the same subgraph.
     for (size_t t_idx : meta.produced) {
         if (!meta.consumed.contains(t_idx)) {
             meta.final_outputs.insert(t_idx);
         }
     }
 
+    // Boundary inputs are consumed tensors that are not produced internally.
     for (size_t t_idx : meta.consumed) {
         if (!meta.produced.contains(t_idx)) {
             meta.boundary_inputs.insert(t_idx);
         }
     }
 
+    // Boundary outputs are produced tensors that escape the subgraph.
     for (size_t t_idx : meta.produced) {
         bool const graph_output = consumers_by_tensor[t_idx].empty();
         bool external_consumer = false;
@@ -170,6 +209,7 @@ auto BuildSubgraphMeta(const Problem& problem, const Subgraph& subgraph,
         }
     }
 
+    // Ephemeral tensors are produced+consumed internally and never escape.
     for (size_t t_idx : meta.produced) {
         bool const consumed_inside = meta.consumed.contains(t_idx);
         if (consumed_inside && !meta.boundary_outputs.contains(t_idx)) {
@@ -180,6 +220,8 @@ auto BuildSubgraphMeta(const Problem& problem, const Subgraph& subgraph,
     return meta;
 }
 
+// Returns explicit spatial traversal order for this subgraph.
+// If traversal is not provided, default row-major order is used.
 auto BuildTraversalOrder(const Problem& problem, const Subgraph& subgraph,
                          size_t reference_output_tensor) -> absl::StatusOr<std::vector<int64_t>> {
     int64_t const out_w = problem.tensors[reference_output_tensor].width;
@@ -208,6 +250,7 @@ auto BuildTraversalOrder(const Problem& problem, const Subgraph& subgraph,
     return order;
 }
 
+// Converts a linear tile id (within traversal grid) to actual clipped tile bounds.
 auto BuildTileForLinearIndex(const Problem& problem, const Subgraph& subgraph, size_t tensor_idx,
                              int64_t linear_idx, int64_t tiles_w) -> Tile {
     int64_t const tx = linear_idx % tiles_w;
@@ -225,6 +268,7 @@ auto BuildTileForLinearIndex(const Problem& problem, const Subgraph& subgraph, s
     return ClipTileToTensor(problem, tile);
 }
 
+// Builds full-tensor resident coverage for retained tensors at subgraph boundaries.
 auto BuildStickyResidentFromRetained(const Problem& problem, const std::set<size_t>& retained)
     -> TilesByTensor {
     TilesByTensor sticky;
@@ -238,6 +282,7 @@ auto BuildStickyResidentFromRetained(const Problem& problem, const std::set<size
     return sticky;
 }
 
+// Carries split-k output accumulators across k steps inside the same spatial tile.
 void AddLockedSplitKOutputs(const TilesByTensor& required_outputs,
                             const std::set<size_t>& split_k_output_tensors,
                             TilesByTensor& transient_next) {
@@ -250,6 +295,8 @@ void AddLockedSplitKOutputs(const TilesByTensor& required_outputs,
     }
 }
 
+// Computes retained full tensors that should survive into the next subgraph.
+// Ephemeral tensors are intentionally ignored here.
 auto BuildNextRetainedSet(const Problem& problem, const Subgraph& subgraph,
                           const SubgraphMeta& meta, const std::set<size_t>& prev_retained)
     -> std::set<size_t> {
@@ -263,6 +310,8 @@ auto BuildNextRetainedSet(const Problem& problem, const Subgraph& subgraph,
             continue;
         }
 
+        // We only retain tensors touched by this step context (consumed/produced/previously
+        // retained).
         bool const touched = meta.consumed.contains(t_idx) || meta.produced.contains(t_idx) ||
                              prev_retained.contains(t_idx);
         if (touched) {
@@ -273,14 +322,23 @@ auto BuildNextRetainedSet(const Problem& problem, const Subgraph& subgraph,
     return next;
 }
 
+// Performs backward propagation for one execution step:
+// - starts from subgraph final output tile(s)
+// - traverses producers backward inside subgraph
+// - emits boundary input/output tile demands
+// - records per-op required output area + reduction depth for compute-time math
+//
+// Spatial tile and k-range (`k_start`, `k_size`) determine the exact per-step shape.
 auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
                              const SubgraphMeta& meta, const std::vector<int>& producer_op,
                              int64_t spatial_tile_linear_idx, int64_t tiles_w, int64_t k_start,
                              int64_t k_size) -> StepRequirements {
     StepRequirements reqs;
 
+    // BFS-like queue of tiles to propagate backward through producer ops.
     std::vector<Tile> queue;
 
+    // Seed queue with current spatial tile for each final output tensor.
     for (size_t out_tensor_idx : meta.final_outputs) {
         Tile out_tile = BuildTileForLinearIndex(problem, subgraph, out_tensor_idx,
                                                 spatial_tile_linear_idx, tiles_w);
@@ -290,6 +348,7 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
 
         queue.push_back(out_tile);
 
+        // Boundary outputs are visible outside subgraph and may trigger writeback.
         if (meta.boundary_outputs.contains(out_tensor_idx) &&
             !meta.ephemeral_tensors.contains(out_tensor_idx)) {
             AddTile(reqs.required_boundary_outputs, out_tile);
@@ -302,19 +361,23 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
 
         int const p_op_idx = producer_op[curr_tile.tensor_idx];
         if (p_op_idx < 0) {
+            // Graph input: no local producer to continue backward traversal.
             continue;
         }
 
         size_t const op_idx = static_cast<size_t>(p_op_idx);
         if (!meta.op_set.contains(op_idx)) {
+            // Producer exists, but not inside this subgraph.
             continue;
         }
 
         const Op& op = problem.ops[op_idx];
 
+        // Record this op's output footprint for compute-time aggregation.
         OpStepRequirement& op_req = reqs.op_requirements[op_idx];
         op_req.output_tiles.push_back(curr_tile);
 
+        // Determine required reduction size for this op in this step.
         int64_t req_k = 1;
         if (op.op_type == "MatMul") {
             size_t const lhs_idx = op.inputs[0];
@@ -326,6 +389,7 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
         op_req.req_k = std::max(op_req.req_k, req_k);
 
         if (op.op_type == "Pointwise") {
+            // Pointwise inputs have exactly the same spatial bounds as outputs.
             for (size_t in_tensor_idx : op.inputs) {
                 Tile in_tile{.tensor_idx = in_tensor_idx,
                              .x0 = curr_tile.x0,
@@ -338,8 +402,10 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
                 }
 
                 if (meta.produced.contains(in_tensor_idx)) {
+                    // Internal dependency: keep traversing backward.
                     queue.push_back(in_tile);
                 } else {
+                    // Boundary dependency: contributes to slow-memory read demand.
                     AddTile(reqs.required_boundary_inputs, in_tile);
                 }
             }
@@ -352,9 +418,14 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
 
             int64_t const full_inner_k = problem.tensors[lhs_idx].width;
             bool const is_final_output_tensor = meta.final_outputs.contains(curr_tile.tensor_idx);
+
+            // Final-output MatMul uses split-k range for this step.
+            // Intermediate MatMul uses full K because it must be fully reduced before use.
             int64_t const k0 = is_final_output_tensor ? k_start : 0;
             int64_t const k1 = is_final_output_tensor ? (k_start + k_size) : full_inner_k;
 
+            // MatMul mapping (height is y axis, width is x axis):
+            // lhs[h, k], rhs[k, w], out[h, w]
             Tile lhs_tile{
                 .tensor_idx = lhs_idx, .x0 = k0, .x1 = k1, .y0 = curr_tile.y0, .y1 = curr_tile.y1};
             Tile rhs_tile{
@@ -384,6 +455,11 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
     return reqs;
 }
 
+// Computes arithmetic time for one step from per-op demand.
+// We scale by:
+// - output area covered in this step
+// - required k depth (for MatMul)
+// - native padding ratio when granularity is smaller than native.
 auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
                             const std::unordered_map<size_t, OpStepRequirement>& op_requirements)
     -> double {
@@ -393,6 +469,7 @@ auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
     double const gran_w = static_cast<double>(subgraph.granularity.width);
     double const gran_h = static_cast<double>(subgraph.granularity.height);
 
+    // Hardware pads to at least native granularity for compute throughput accounting.
     double const padded_w =
         static_cast<double>(std::max(problem.native_granularity.width, subgraph.granularity.width));
     double const padded_h = static_cast<double>(
@@ -405,6 +482,7 @@ auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
     for (const auto& [op_idx, req] : op_requirements) {
         const Op& op = problem.ops[op_idx];
 
+        // Non-overlapping output area this op contributes in current step.
         int64_t const required_output_area = Tile::ComputeNonOverlappingArea(req.output_tiles);
         if (required_output_area <= 0) {
             continue;
@@ -418,6 +496,7 @@ auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
             req_k = req.req_k;
         }
 
+        // Fraction of a native full op represented by this step.
         double const numerator =
             static_cast<double>(required_output_area) * static_cast<double>(req_k);
         double const denominator = native_w * native_h * static_cast<double>(full_k);
@@ -431,12 +510,15 @@ auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
 
 } // namespace
 
+// Returns area in tensor elements for this tile.
 auto Tile::area() const -> int64_t {
     int64_t const w = std::max<int64_t>(0, x1 - x0);
     int64_t const h = std::max<int64_t>(0, y1 - y0);
     return w * h;
 }
 
+// Exact union area across possibly overlapping tiles.
+// Algorithm: for each tensor independently, do x-axis sweep-line and maintain active y-intervals.
 auto Tile::ComputeNonOverlappingArea(const std::vector<Tile>& tiles) -> int64_t {
     std::unordered_map<size_t, std::vector<Tile>> by_tensor;
     for (const Tile& t : tiles) {
@@ -453,7 +535,7 @@ auto Tile::ComputeNonOverlappingArea(const std::vector<Tile>& tiles) -> int64_t 
             int64_t x;
             int64_t y0;
             int64_t y1;
-            int type; // +1 add, -1 remove
+            int type; // +1 when rectangle opens at x0, -1 when it closes at x1.
         };
 
         std::vector<Event> events;
@@ -464,6 +546,7 @@ auto Tile::ComputeNonOverlappingArea(const std::vector<Tile>& tiles) -> int64_t 
             events.push_back(Event{.x = t.x1, .y0 = t.y0, .y1 = t.y1, .type = -1});
         }
 
+        // Primary sort by x, secondary keeps +1 before -1 at same x to avoid transient undercount.
         std::sort(events.begin(), events.end(), [](const Event& a, const Event& b) {
             if (a.x != b.x) {
                 return a.x < b.x;
@@ -471,8 +554,10 @@ auto Tile::ComputeNonOverlappingArea(const std::vector<Tile>& tiles) -> int64_t 
             return a.type > b.type;
         });
 
+        // Active interval multiset represented as interval -> refcount.
         std::map<std::pair<int64_t, int64_t>, int> active;
 
+        // Computes total covered y-length from current active interval set.
         auto covered_y = [&]() -> int64_t {
             if (active.empty()) {
                 return 0;
@@ -499,10 +584,12 @@ auto Tile::ComputeNonOverlappingArea(const std::vector<Tile>& tiles) -> int64_t 
             for (size_t i = 1; i < intervals.size(); ++i) {
                 const auto& [y0, y1] = intervals[i];
                 if (y0 > cur_y1) {
+                    // Disjoint interval; finalize previous merged segment.
                     total += std::max<int64_t>(0, cur_y1 - cur_y0);
                     cur_y0 = y0;
                     cur_y1 = y1;
                 } else {
+                    // Overlap/touch; extend merged segment.
                     cur_y1 = std::max(cur_y1, y1);
                 }
             }
@@ -517,10 +604,13 @@ auto Tile::ComputeNonOverlappingArea(const std::vector<Tile>& tiles) -> int64_t 
         while (i < events.size()) {
             int64_t const x = events[i].x;
             int64_t const dx = x - prev_x;
+
+            // Area contributed by the slab [prev_x, x).
             if (dx > 0) {
                 total_area += dx * covered_y();
             }
 
+            // Apply all events at this x position.
             while (i < events.size() && events[i].x == x) {
                 const Event& e = events[i];
                 auto key = std::make_pair(e.y0, e.y1);
@@ -545,21 +635,30 @@ auto Tile::ComputeNonOverlappingArea(const std::vector<Tile>& tiles) -> int64_t 
     return total_area;
 }
 
-// Solution is checked to not overflow fast memory no need to check for that in the cost model.
-// returns the total latency. Return a tuple of the updated solution with subgraph latencies filled
-// in, and the total latency of the solution.
+// Estimates all subgraph latencies for a proposed solution and returns
+// both the updated solution and total latency.
+//
+// State model used per subgraph:
+// - required_boundary_tiles: demand for the current step
+// - resident_boundary_tiles: what is already in fast memory (sticky + transient)
+// - retained_tensors_next_subgraph: full tensors kept across subgraph boundary
+//
+// Ephemeral tensors are excluded from slow-memory fetch/write accounting.
 auto CostModel::estimate(const Problem& problem, const Solution& solution)
     -> StatusOr<std::tuple<Solution, SubgraphLatency>> {
     if (problem.slow_memory_bandwidth <= 0) {
         return absl::InvalidArgumentError("CostModel: slow_memory_bandwidth must be positive");
     }
 
+    // tensor -> producer op index
     std::vector<int> const producer_op = BuildProducerMap(problem);
+    // tensor -> all consumer op indices
     std::vector<std::vector<size_t>> const consumers_by_tensor = BuildConsumersMap(problem);
 
     Solution estimated_solution = solution;
     SubgraphLatency total_latency = 0.0;
 
+    // Full tensors retained from previous subgraph boundary.
     std::set<size_t> prev_retained_tensors;
 
     for (size_t sg_idx = 0; sg_idx < estimated_solution.subgraphs.size(); ++sg_idx) {
@@ -570,14 +669,17 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
             return absl::InvalidArgumentError("CostModel: subgraph granularity must be positive");
         }
 
+        // As requested: keep w/h at or below native granularity.
         if (subgraph.granularity.width > problem.native_granularity.width ||
             subgraph.granularity.height > problem.native_granularity.height) {
             return absl::InvalidArgumentError(
                 "CostModel: subgraph granularity width/height cannot exceed native granularity");
         }
 
+        // Classify tensor roles for this subgraph.
         SubgraphMeta const meta = BuildSubgraphMeta(problem, subgraph, consumers_by_tensor);
 
+        // Choose one output tensor to define spatial tile grid dimensions.
         size_t reference_output_tensor = 0;
         if (!meta.final_outputs.empty()) {
             reference_output_tensor = *meta.final_outputs.begin();
@@ -598,9 +700,13 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
         if (!traversal_order_or.ok()) {
             return traversal_order_or.status();
         }
+        // Maps loop index -> spatial tile id in traversal sequence.
         const std::vector<int64_t>& traversal_order = traversal_order_or.value();
 
-        int64_t split_k_full = 1;
+        // Split-k analysis on final outputs.
+        // If final outputs are MatMul-produced and depth < full K, each spatial tile has multiple k
+        // steps.
+        int64_t split_k_full = 1; // Shared full-K among final MatMul outputs.
         bool has_final_matmul = false;
         std::set<size_t> split_k_output_tensors;
 
@@ -632,49 +738,61 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
             num_k_steps = CeilDiv(split_k_full, subgraph.granularity.depth);
         }
 
+        // Output accumulators that must stay resident between k slices of the same spatial tile.
         std::set<size_t> locked_split_k_output_tensors;
         if (num_k_steps > 1) {
             locked_split_k_output_tensors = split_k_output_tensors;
         }
 
+        // What we intend to keep across this subgraph boundary.
         std::set<size_t> retained_for_next =
             BuildNextRetainedSet(problem, subgraph, meta, prev_retained_tensors);
         std::set<size_t> retained_for_next_lookup = retained_for_next;
 
+        // Slices kept only across adjacent steps inside current subgraph.
         TilesByTensor transient_resident;
 
         SubgraphLatency subgraph_latency = 0.0;
 
+        // Outer loop: spatial traversal.
         for (int64_t order_idx = 0; order_idx < num_spatial_tiles; ++order_idx) {
             int64_t const spatial_tile_idx = traversal_order[static_cast<size_t>(order_idx)];
 
+            // Inner loop: split-k traversal for this spatial tile.
             for (int64_t k_step_idx = 0; k_step_idx < num_k_steps; ++k_step_idx) {
-                int64_t k_start = 0;
-                int64_t k_size = 1;
+                int64_t k_start = 0; // inclusive K index for this step
+                int64_t k_size = 1;  // number of K elements in this step
 
                 if (has_final_matmul) {
                     k_start = k_step_idx * subgraph.granularity.depth;
                     k_size = std::min<int64_t>(subgraph.granularity.depth, split_k_full - k_start);
                 }
 
+                // Backward-propagated tile requirements for this exact (spatial,k) step.
                 StepRequirements const reqs =
                     CollectStepRequirements(problem, subgraph, meta, producer_op, spatial_tile_idx,
                                             tiles_w, k_start, k_size);
 
+                // Arithmetic component for this step.
                 double const step_compute_time =
                     ComputeStepComputeTime(problem, subgraph, reqs.op_requirements);
 
+                // Sticky residency from previous subgraph boundary (full tensors).
                 TilesByTensor sticky_resident =
                     BuildStickyResidentFromRetained(problem, prev_retained_tensors);
 
+                // Effective resident set for this step = sticky + intra-subgraph transient.
                 TilesByTensor resident_at_step = sticky_resident;
                 AddTiles(resident_at_step, transient_resident);
 
+                // Slow-memory reads needed by boundary inputs that are not fully resident.
                 int64_t const memory_in_elements =
                     ComputeMissingArea(reqs.required_boundary_inputs, resident_at_step);
 
                 bool const is_last_k_step = (k_step_idx == (num_k_steps - 1));
 
+                // Boundary outputs written this step.
+                // Suppress write for retained outputs and intermediate split-k accumulations.
                 TilesByTensor write_outputs;
                 for (const auto& [tensor_idx, tiles] : reqs.required_boundary_outputs) {
                     if (retained_for_next_lookup.contains(tensor_idx)) {
@@ -694,9 +812,13 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
                     static_cast<double>(memory_in_elements + memory_out_elements) /
                     static_cast<double>(problem.slow_memory_bandwidth);
 
+                // Roofline step time.
                 subgraph_latency += std::max(step_compute_time, memory_time);
 
+                // Update transient resident set for next step.
+                // We keep current boundary inputs for possible immediate reuse.
                 TilesByTensor transient_next = reqs.required_boundary_inputs;
+                // For split-k, also keep output accumulators until final k step.
                 if (!is_last_k_step) {
                     AddLockedSplitKOutputs(reqs.required_boundary_outputs,
                                            locked_split_k_output_tensors, transient_next);
@@ -709,6 +831,7 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
         subgraph.subgraph_latency = subgraph_latency;
         total_latency += subgraph_latency;
 
+        // Carry retained full tensors into next subgraph.
         prev_retained_tensors = std::move(retained_for_next);
     }
 
