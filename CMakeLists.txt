@@ -57,10 +57,19 @@ target_compile_definitions(evaluate_test PRIVATE
 include(GoogleTest)
 gtest_discover_tests(evaluate_test)
 
+# Define the cost_model_test executable
+add_executable(cost_model_test cost_model_test.cpp)
+target_link_libraries(cost_model_test PRIVATE mlsys_lib GTest::gtest_main)
+target_compile_definitions(cost_model_test PRIVATE
+    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples"
+)
+gtest_discover_tests(cost_model_test)
+
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(mlsys_lib PRIVATE DEBUG)
     target_compile_definitions(mlsys PRIVATE DEBUG)
     target_compile_definitions(evaluate_test PRIVATE DEBUG)
+    target_compile_definitions(cost_model_test PRIVATE DEBUG)
 endif()
 
 if(CLANG_FORMAT_EXE)
