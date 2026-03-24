@@ -30,7 +30,7 @@ The third dimension, `k`, defines the reduction depth. This is primarily for Mat
 
 For every computation iteration, the system executes at your specified execution granularity. A slice of input data is loaded from the fast memory, the computation is performed, and the output slice is written back. This creates the primary physical constraint of the problem: The Working Set Limit. For any chosen execution granularity, the sum of the required input slices and the resulting output slices must fit simultaneously within the fast memory capacity. If the working set exceeds this limit, the execution will crash with an Out-Of-Memory (OOM) error.
 
-Note that the hardware has a native execution granularity (e.g., 128x128). While you may choose a finer granularity to fit data into memory, the compute cores cannot physically process chunks smaller than this native size. If you select a granularity smaller than the native size, the hardware 'pads' the execution, meaning you pay the full compute cost of the native size but produce less useful output, thereby increasing the total number of execution steps required.
+Note that the hardware has a native execution granularity (e.g., 128x128) that applies to all dimensions. The spatial dimensions (`w`, `h`) map to the physical array — if you select a spatial granularity smaller than the native size, the hardware 'pads' the execution, meaning you pay the full compute cost of the native size but produce less useful output, thereby increasing the total number of execution steps required. The reduction dimension (`k`) is streamed temporally through the array — choosing `k` below native simply runs fewer cycles, dividing compute proportionally without waste.
 
 ### Modeling Simplification for Experts
 
@@ -94,7 +94,7 @@ You must provide a JSON object containing parallel lists that define the executi
 
 Regarding the “granularities” list, the `[w, h, k]` tuple acts as a master key that deterministically sets the shape of all inputs required by the subgraph (recalling that width corresponds to columns and height corresponds to rows). The output and pointwise input will both have width `w` and height `h`. For MatMul inputs, the Left-Hand Side (LHS) input requires width `k` (reduction depth) and height `h`, while the Right-Hand Side (RHS) Input requires width `w` and height `k`.
 
-Regarding the “tensors\_to\_retain” list, a list of lists where tensors\_to\_retain\[k\] specifies which output tensors (or loaded inputs) from Subgraph k should remain resident in the fast memory after the subgraph finishes. Any tensor not in this list is automatically evicted to the slow memory (if it is an output) or discarded (if it was an input). **Note on Data Reuse:** `tensors_to_retain` strictly controls **Inter-Subgraph** persistence (keeping data resident *across* the boundary from one step to the next). For **Intra-Subgraph** reuse (keeping data resident *during* the execution of a single step, e.g., by optimizing `traversal_orders`), the hardware manages residency automatically/implicitly. You do **not** need to list tensors for intra-subgraph reuse in this field.
+Regarding the “tensors\_to\_retain” list, a list of lists where tensors\_to\_retain\[k\] specifies which output tensors from Subgraph k should remain resident in the fast memory after the subgraph finishes. Any tensor not in this list is automatically evicted to the slow memory (if it is an output) or discarded (if it was an input). **Note on Data Reuse:** `tensors_to_retain` strictly controls **Inter-Subgraph** persistence (keeping data resident *across* the boundary from one step to the next). For **Intra-Subgraph** reuse (keeping data resident *during* the execution of a single step, e.g., by optimizing `traversal_orders`), the hardware manages residency automatically/implicitly. You do **not** need to list tensors for intra-subgraph reuse in this field.
 
 Regarding the “traversal\_orders” list, when you choose a spatial granularity `(w, h)` smaller than the output tensor, the system implicitly creates a grid of tiles indexed in Row-Major (Raster) Order. For example, a `128x128` tensor with `64x64` granularity creates indices 0 (top-left), 1 (top-right), 2 (bottom-left), and 3 (bottom-right). The “traversal\_orders” field allows you to specify the exact sequence of execution (e.g., `[0, 1, 3, 2]`) to optimize data reuse (like a "Snake" pattern). If omitted, the system defaults to Raster order.
 
@@ -138,8 +138,6 @@ Input
 }
 ```
 
-#### 
-
 #### Strategy A: Always Spill to Slow Memory
 
 Output
@@ -154,7 +152,7 @@ Output
 }
 ```
 
-* Compute: efficient. The execution granularity (`128x128`) is the same as the hardware’s native granularity (`128x128`) .  
+* Compute: efficient. The execution granularity (`128x128`) is the same as the hardware’s native granularity (`128x128`).  
 * Subgraph 0:  
   * Move `Tensor0` from the slow memory to the fast memory. `MemoryTime0_in = Tensor0/B = 128x128/10 = 1638.4`  
   * Run `Op0`. `ComputeTime0 = Op0 = 1,000`  
@@ -168,9 +166,7 @@ Output
 * Graph total:  
   * `TotalLatency = TotalLatency0+TotalLatency1 = 3,276.8 + 3,276.8 = 6,553.6` (Memory Bound).
 
-#### 
-
-#### Strategy B: Mega-Group with Large Granularity (128 x 128\)
+#### Strategy B: Mega-Group with Large Granularity (128 x 128)
 
 Output: 
 
@@ -193,9 +189,7 @@ Output:
 * Graph total:  
   * `TotalLatency = TotalLatency0 = 3,276.8` (Memory Bound, but 2X faster than Strategy A).
 
-#### 
-
-#### Strategy C: Mega-Group with Small Granularity (64 x 64\)
+#### Strategy C: Mega-Group with Small Granularity (64 x 64)
 
 Output: 
 
@@ -219,7 +213,7 @@ Output:
 * Graph total:  
   * `TotalLatency = 4 x TotalLatency0 = 4,400`  (Compute Bound, but 1.5X faster than Strategy A).
 
-### Example 2: Fast Memory Capacity
+### Example 2: Larger Tensors
 
 The tensors are now `256x256`.   
 Input:
@@ -232,17 +226,15 @@ Input:
   "outputs": [[1], [2]],
   "base_costs": [1000, 100],
   "op_types": ["Pointwise","Pointwise"],
-  "fast_memory_capacity": 25000,
+  "fast_memory_capacity": 35000,
   "slow_memory_bandwidth": 10,
   "native_granularity": [128, 128]
 }
 ```
 
-#### 
-
 #### Strategy A: Always Spill to Slow Memory
 
-Output: 
+Output:
 
 ```json
 {
@@ -254,25 +246,23 @@ Output:
 }
 ```
 
-* Compute: efficient. An execution granularity of `256x256` pointwise operations will take 4 passes to fully compute on the `128x128` native granularity.  
+* Compute: efficient. The `256x256` pointwise operations will take 4 passes to fully compute on the `128x128` native granularity.
 * Subgraph0:  
   * Now has to execute 4 times. Each time:  
     * Move `¼` `Tensor0` from the slow memory to the fast memory. `MemoryTime0_in = ¼ Tensor0/B = 128x128/10 = 1,638.4`  
     * Run `Op0`.  `ComputeTime0 = Op0 = 1,000`  
-    * Evict `¼` `Tensor1` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 128x128/10 = 1,638.4`  
+    * Evict `¼` `Tensor1` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor1/B = 128x128/10 = 1,638.4`
   * `TotalLatency0 = 4 x max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 13,107.2`  
 * Subgraph1:  
   * Also has to execute 4 times. Each time:  
-    * Move `¼` `Tensor1` from the slow memory to the fast memory. `MemoryTime1_in = ¼ Tensor0/B = 128x128/10 = 1,638.4`  
+    * Move `¼` `Tensor1` from the slow memory to the fast memory. `MemoryTime1_in = ¼ Tensor1/B = 128x128/10 = 1,638.4`
     * Run `Op1`.  `ComputeTime1 = Op1 = 100`  
     * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime1_out = ¼ Tensor2/B = 128x128/10 = 1,638.4`  
   * `TotalLatency1 = 4 x max(ComputeTime1, MemoryTime1_in+MemoryTime1_out) = 13,107.2`  
 * Graph total:  
   * `TotalLatency = TotalLatency0 + TotalLatency1 = 26,214.4` (Memory Bound).
 
-#### 
-
-#### Strategy B: Mega-Group with Small Granularity (128 x 128\)
+#### Strategy B: Mega-Group with Small Granularity (128 x 128)
 
 Output: 
 
@@ -295,8 +285,6 @@ Output:
   * `TotalLatency0 = 4 x max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 13,107.2`  
 * Graph total:  
   * `TotalLatency = TotalLatency0 = 13,107.2`  (Memory Bound, but 2X faster than Strategy A)
-
-### 
 
 ### Example 3: Spilling vs. Recomputation
 
@@ -336,8 +324,6 @@ Input:
   "native_granularity": [128, 128]
 }
 ```
-
-#### 
 
 #### Strategy A: Spilling (The "Cache" Approach)
 
@@ -398,8 +384,6 @@ Output:
   * `TotalLatency1 = max(ComputeTime1, MemoryTime1_in + MemoryTime1_out) = 3,276.8`  
 * Graph total:  
   * `TotalLatency = TotalLatency0 +TotalLatency1 = 6,276.8` (45% faster than Strategy A).
-
-#### 
 
 #### Strategy C: Selective Residency (The "Hybrid" Approach)
 
@@ -472,7 +456,7 @@ Similarly, we divide `tensor1` (`128x128`) into 2 concatenated column strips:
 
 #### Strategy A: Naive Tiling (High Revisit)
 
-We process tiles in standard raster order (top-left \-\> top-right \-\> bottom-left \-\> bottom-right) but flush the fast memory every time.  
+We process tiles in standard raster order (top-left \-\> top-right \-\> bottom-left \-\> bottom-right).
 Output
 
 ```json
@@ -481,7 +465,7 @@ Output
   "granularities": [[64,64,128]],
   "tensors_to_retain": [[]],
   "traversal_orders": [null],
-  "subgraph_latencies": [8192]
+  "subgraph_latencies": [7096]
 }
 ```
 
@@ -489,34 +473,32 @@ Smaller granularity is required, because all 3 tensors can’t co-exist in the f
 
 The `128x128` output is computed in 4 equal steps.
 
-* Step 1 (top-left):  
-  * Move row strip 0 from the slow memory to the fast memory. `MemoryTime0_in = 819.2`  
-  * Move column strip 0 from the slow memory to the fast memory. `MemoryTime0_in += 819.2` (`MemoryTime0_in = 1638.4`).  
-  * Run `Op0`.  `ComputeTime0 = Op0 = 1,500`  
-  * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 64x64/10 = 409.6`  
-  * `TotalLatency0_1 = max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 2,048`  
-* Step 2 (top-right):  
-  * Move row strip 0 from the slow memory to the fast memory. `MemoryTime0_in = 819.2`  
-  * Move column strip 1 from the slow memory to the fast memory. `MemoryTime0_in += 819.2` (`MemoryTime0_in = 1638.4`).  
-  * Run `Op0`.  `ComputeTime0 = Op0 = 1,500`  
-  * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 64x64/10 = 409.6`  
-  * `TotalLatency0_2 = max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 2,048`  
-* Step 3 (lower-left):  
-  * Move row strip 1 from the slow memory to the fast memory. `MemoryTime0_in = 819.2`  
-  * Move column strip 0 from the slow memory to the fast memory. `MemoryTime0_in += 819.2` (`MemoryTime0_in = 1638.4`).  
-  * Run `Op0`.  `ComputeTime0 = Op0 = 1,500`  
-  * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 64x64/10 = 409.6`  
-  * `TotalLatency0_3 = max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 2,048`  
-* Step 4 (lower-right):  
-  * Move row strip 1 from the slow memory to the fast memory. `MemoryTime0_in = 819.2`  
-  * Move column strip 1 from the slow memory to the fast memory. `MemoryTime0_in += 819.2` (`MemoryTime0_in = 1638.4`).  
-  * Run `Op0`.  `ComputeTime0 = Op0 = 1,500`  
-  * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 64x64/10 = 409.6`  
-  * `TotalLatency0_4 = max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 2,048`  
-* Graph total:  
-  * `TotalLatency = TotalLatency0_1 + TotalLatency0_2 + TotalLatency0_3 + TotalLatency0_4 = 8,192` (Memory bound).
-
-#### 
+* Step 1 (top-left):
+  * Move row strip 0 from the slow memory to the fast memory. `MemoryTime0_in = 819.2`
+  * Move column strip 0 from the slow memory to the fast memory. `MemoryTime0_in += 819.2` (`MemoryTime0_in = 1638.4`).
+  * Run `Op0`.  `ComputeTime0 = Op0 = 1,500`
+  * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 64x64/10 = 409.6`
+  * `TotalLatency0_1 = max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 2,048`
+* Step 2 (top-right):
+  * Reuse resident row strip 0.
+  * Move column strip 1 from the slow memory to the fast memory. `MemoryTime0_in = 819.2`
+  * Run `Op0`.  `ComputeTime0 = Op0 = 1,500`
+  * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 64x64/10 = 409.6`
+  * `TotalLatency0_2 = max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 1,500`
+* Step 3 (bottom-left):
+  * Move row strip 1 from the slow memory to the fast memory. `MemoryTime0_in = 819.2`
+  * Move column strip 0 from the slow memory to the fast memory. `MemoryTime0_in += 819.2` (`MemoryTime0_in = 1638.4`).
+  * Run `Op0`.  `ComputeTime0 = Op0 = 1,500`
+  * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 64x64/10 = 409.6`
+  * `TotalLatency0_3 = max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 2,048`
+* Step 4 (bottom-right):
+  * Reuse resident row strip 1.
+  * Move column strip 1 from the slow memory to the fast memory. `MemoryTime0_in = 819.2`
+  * Run `Op0`.  `ComputeTime0 = Op0 = 1,500`
+  * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 64x64/10 = 409.6`
+  * `TotalLatency0_4 = max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 1,500`
+* Graph total:
+  * `TotalLatency = TotalLatency0_1 + TotalLatency0_2 + TotalLatency0_3 + TotalLatency0_4 = 7,096` (Memory bound, 2 reuses).
 
 #### Strategy B: Optimized Traversal (Data Reuse)
 
@@ -562,9 +544,7 @@ The `128x128` output is divided into 4 chunks.
   * Evict `¼` `Tensor2` from the fast memory to the slow memory. `MemoryTime0_out = ¼ Tensor2/B = 64x64/10 = 409.6`  
   * `TotalLatency0_4 = max(ComputeTime0, MemoryTime0_in+MemoryTime0_out) = 1,500`  
 * Graph total:  
-  * `TotalLatency = TotalLatency0_1 + TotalLatency0_2 + TotalLatency0_3 + TotalLatency0_4 = 6,548` (Largely compute bound, 20% faster than Strategy A).
-
-### 
+  * `TotalLatency = TotalLatency0_1 + TotalLatency0_2 + TotalLatency0_3 + TotalLatency0_4 = 6,548` (Largely compute bound, ~8% faster than Strategy A).
 
 ### Example 5: Chained Matrix Multiplication (Split-K)
 
@@ -588,8 +568,8 @@ graph LR
     Op1 --> Tensor4
 ```
 
-* Scenario**:** We calculate `(Tensor0 @ Tensor1) @ Tensor2`.   
-* Constraint**:** The fast memory capacity (45,000) is tight. It cannot hold three full `128x128` tensors (16,384 each) simultaneously.
+* **Scenario:** We calculate `(Tensor0 @ Tensor1) @ Tensor2`.
+* **Constraint:** The fast memory capacity (45,000) is tight. It cannot hold three full `128x128` tensors (16,384 each) simultaneously.
 
 Input:
 
@@ -607,8 +587,6 @@ Input:
 }
 ```
 
-#### 
-
 #### Strategy A: Materialization (Large K)
 
 We group the operations but use the full reduction depth (`k=128`). This forces the system to fully compute and store `Tensor3` (the intermediate) before starting `Op1`.  
@@ -620,8 +598,6 @@ NA
 
 * Memory check (FAIL): to execute `Op0`, we need `Tensor0` (`128x128`), `Tensor1` (`128x128`), and the Output `Tensor3` (`128x128`) resident. The Working Set is `49,152` (`3x128x128`).  
 * `49,152 > 45,000`. OOM.
-
-#### 
 
 #### Strategy B: Split-K Pipelining (Small K)
 
