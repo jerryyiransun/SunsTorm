@@ -35,6 +35,8 @@ struct SubgraphMeta {
     // Tensors consumed in this subgraph but produced outside it.
     std::set<size_t> boundary_inputs;
     // Tensors produced in this subgraph and needed outside it (or final graph outputs).
+    // Not always the same as final_outputs:
+    // a tensor can be consumed both inside this subgraph and by a later subgraph.
     std::set<size_t> boundary_outputs;
 
     // Produced+consumed fully inside the same subgraph with no external visibility.
@@ -161,6 +163,74 @@ auto BuildConsumersMap(const Problem& problem) -> std::vector<std::vector<size_t
     return consumers;
 }
 
+// Returns true if the given op consumes tensor_idx as one of its inputs.
+auto OpConsumesTensor(const Problem& problem, size_t op_idx, size_t tensor_idx) -> bool {
+    if (op_idx >= problem.ops.size()) {
+        return false;
+    }
+    for (size_t in_tensor_idx : problem.ops[op_idx].inputs) {
+        if (in_tensor_idx == tensor_idx) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Returns true if this produced tensor must survive the current subgraph boundary
+// to satisfy a future consumer execution.
+//
+// Why schedule-aware:
+// the same producer op can appear in later subgraphs (recomputation). If a later
+// consumer is preceded by that producer within the same subgraph, the consumer is
+// satisfied by local recomputation and does not require carrying this boundary value.
+auto NeedsBoundaryCarryForFutureConsumer(const Problem& problem, const Solution& solution,
+                                         const std::vector<int>& producer_op, size_t tensor_idx,
+                                         size_t current_subgraph_idx) -> bool {
+    if (tensor_idx >= producer_op.size()) {
+        return false;
+    }
+    int const producer_op_idx_signed = producer_op[tensor_idx];
+    if (producer_op_idx_signed < 0) {
+        return false;
+    }
+    size_t const producer_op_idx = static_cast<size_t>(producer_op_idx_signed);
+
+    for (size_t future_sg_idx = current_subgraph_idx + 1; future_sg_idx < solution.subgraphs.size();
+         ++future_sg_idx) {
+        const Subgraph& future_sg = solution.subgraphs[future_sg_idx];
+
+        // Pre-collect producer positions in this future subgraph so we can check
+        // "producer before consumer" quickly.
+        std::vector<size_t> producer_positions;
+        for (size_t pos = 0; pos < future_sg.ops.size(); ++pos) {
+            if (future_sg.ops[pos] == producer_op_idx) {
+                producer_positions.push_back(pos);
+            }
+        }
+
+        for (size_t consumer_pos = 0; consumer_pos < future_sg.ops.size(); ++consumer_pos) {
+            size_t const op_idx = future_sg.ops[consumer_pos];
+            if (!OpConsumesTensor(problem, op_idx, tensor_idx)) {
+                continue;
+            }
+
+            bool has_local_producer_before_consumer = false;
+            for (size_t producer_pos : producer_positions) {
+                if (producer_pos < consumer_pos) {
+                    has_local_producer_before_consumer = true;
+                    break;
+                }
+            }
+
+            if (!has_local_producer_before_consumer) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 // Derives subgraph-local tensor role classification used by the estimator.
 auto BuildSubgraphMeta(const Problem& problem, const Subgraph& subgraph,
                        const std::vector<std::vector<size_t>>& consumers_by_tensor)
@@ -193,7 +263,8 @@ auto BuildSubgraphMeta(const Problem& problem, const Subgraph& subgraph,
         }
     }
 
-    // Boundary outputs are produced tensors that escape the subgraph.
+    // Initial boundary-output classification from pure graph topology.
+    // The estimator refines this later with schedule-aware recomputation analysis.
     for (size_t t_idx : meta.produced) {
         bool const graph_output = consumers_by_tensor[t_idx].empty();
         bool external_consumer = false;
@@ -251,6 +322,8 @@ auto BuildTraversalOrder(const Problem& problem, const Subgraph& subgraph,
 }
 
 // Converts a linear tile id (within traversal grid) to actual clipped tile bounds.
+// Only used for output tensors with specific spatial granularity, so we can use that granularity to
+// compute tile coordinates.
 auto BuildTileForLinearIndex(const Problem& problem, const Subgraph& subgraph, size_t tensor_idx,
                              int64_t linear_idx, int64_t tiles_w) -> Tile {
     int64_t const tx = linear_idx % tiles_w;
@@ -273,6 +346,7 @@ auto BuildStickyResidentFromRetained(const Problem& problem, const std::set<size
     -> TilesByTensor {
     TilesByTensor sticky;
     for (size_t t_idx : retained) {
+        // Defensive guard for malformed retain lists; valid solutions never hit this.
         if (t_idx >= problem.tensors.size()) {
             continue;
         }
@@ -306,12 +380,15 @@ auto BuildNextRetainedSet(const Problem& problem, const Subgraph& subgraph,
         if (t_idx >= problem.tensors.size()) {
             continue;
         }
+        // Ephemeral tensors never cross subgraph boundaries by definition, so retaining
+        // them has no semantic effect and would only distort residency accounting.
         if (meta.ephemeral_tensors.contains(t_idx)) {
             continue;
         }
 
         // We only retain tensors touched by this step context (consumed/produced/previously
         // retained).
+        // Technically we could retain untouched tensors, but that would make no sense.
         bool const touched = meta.consumed.contains(t_idx) || meta.produced.contains(t_idx) ||
                              prev_retained.contains(t_idx);
         if (touched) {
@@ -342,32 +419,35 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
     for (size_t out_tensor_idx : meta.final_outputs) {
         Tile out_tile = BuildTileForLinearIndex(problem, subgraph, out_tensor_idx,
                                                 spatial_tile_linear_idx, tiles_w);
+        // Defensive clamp for malformed zero-sized tensors.
         if (out_tile.area() <= 0) {
             continue;
         }
 
         queue.push_back(out_tile);
-
-        // Boundary outputs are visible outside subgraph and may trigger writeback.
-        if (meta.boundary_outputs.contains(out_tensor_idx) &&
-            !meta.ephemeral_tensors.contains(out_tensor_idx)) {
-            AddTile(reqs.required_boundary_outputs, out_tile);
-        }
     }
 
     size_t head = 0;
     while (head < queue.size()) {
         Tile curr_tile = queue[head++];
 
+        // Any externally visible produced tensor touched in this step may need writeback.
+        // We do this here (rather than only at seed time) so fan-out tensors that are
+        // consumed both internally and externally are correctly accounted.
+        if (meta.boundary_outputs.contains(curr_tile.tensor_idx) &&
+            !meta.ephemeral_tensors.contains(curr_tile.tensor_idx)) {
+            AddTile(reqs.required_boundary_outputs, curr_tile);
+        }
+
         int const p_op_idx = producer_op[curr_tile.tensor_idx];
+        // Graph input or malformed producer map: no local producer to continue with.
         if (p_op_idx < 0) {
-            // Graph input: no local producer to continue backward traversal.
             continue;
         }
 
         size_t const op_idx = static_cast<size_t>(p_op_idx);
+        // Producer exists but is not inside current subgraph.
         if (!meta.op_set.contains(op_idx)) {
-            // Producer exists, but not inside this subgraph.
             continue;
         }
 
@@ -375,6 +455,8 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
 
         // Record this op's output footprint for compute-time aggregation.
         OpStepRequirement& op_req = reqs.op_requirements[op_idx];
+        // The same op output tile can be discovered via multiple backward paths; we keep
+        // all tiles and take a non-overlapping union later to avoid double-counting compute.
         op_req.output_tiles.push_back(curr_tile);
 
         // Determine required reduction size for this op in this step.
@@ -397,6 +479,7 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
                              .y0 = curr_tile.y0,
                              .y1 = curr_tile.y1};
                 in_tile = ClipTileToTensor(problem, in_tile);
+                // Defensive guard for malformed or degenerate tensor dimensions.
                 if (in_tile.area() <= 0) {
                     continue;
                 }
@@ -469,7 +552,9 @@ auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
     double const gran_w = static_cast<double>(subgraph.granularity.width);
     double const gran_h = static_cast<double>(subgraph.granularity.height);
 
-    // Hardware pads to at least native granularity for compute throughput accounting.
+    // PROBLEM.md specifies: if spatial granularity is below native, compute is padded
+    // up to native. Since we enforce granularity.width/height <= native, this models
+    // exactly that "pad up to native" behavior.
     double const padded_w =
         static_cast<double>(std::max(problem.native_granularity.width, subgraph.granularity.width));
     double const padded_h = static_cast<double>(
@@ -483,6 +568,8 @@ auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
         const Op& op = problem.ops[op_idx];
 
         // Non-overlapping output area this op contributes in current step.
+        // This captures edge tiles (clipped area) and avoids duplicate counting when
+        // backward traversal reaches the same op-output tile through multiple paths.
         int64_t const required_output_area = Tile::ComputeNonOverlappingArea(req.output_tiles);
         if (required_output_area <= 0) {
             continue;
@@ -496,7 +583,8 @@ auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
             req_k = req.req_k;
         }
 
-        // Fraction of a native full op represented by this step.
+        // Fraction of a native full op represented by this step:
+        // spatial fraction (output area) * reduction fraction (req_k / full_k).
         double const numerator =
             static_cast<double>(required_output_area) * static_cast<double>(req_k);
         double const denominator = native_w * native_h * static_cast<double>(full_k);
@@ -677,9 +765,34 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
         }
 
         // Classify tensor roles for this subgraph.
-        SubgraphMeta const meta = BuildSubgraphMeta(problem, subgraph, consumers_by_tensor);
+        SubgraphMeta meta = BuildSubgraphMeta(problem, subgraph, consumers_by_tensor);
+
+        // Refine boundary outputs with schedule-aware recomputation behavior.
+        // A produced tensor must escape only if:
+        // 1) it is a graph output, or
+        // 2) some future consumer needs it before a local recomputation.
+        meta.boundary_outputs.clear();
+        for (size_t t_idx : meta.produced) {
+            bool const graph_output = consumers_by_tensor[t_idx].empty();
+            bool const needed_for_future_consumer = NeedsBoundaryCarryForFutureConsumer(
+                problem, estimated_solution, producer_op, t_idx, sg_idx);
+            if (graph_output || needed_for_future_consumer) {
+                meta.boundary_outputs.insert(t_idx);
+            }
+        }
+
+        // Recompute ephemeral set using the refined boundary-output definition.
+        meta.ephemeral_tensors.clear();
+        for (size_t t_idx : meta.produced) {
+            bool const consumed_inside = meta.consumed.contains(t_idx);
+            if (consumed_inside && !meta.boundary_outputs.contains(t_idx)) {
+                meta.ephemeral_tensors.insert(t_idx);
+            }
+        }
 
         // Choose one output tensor to define spatial tile grid dimensions.
+        // The estimator requires all final outputs to share the same tile count so a
+        // single traversal order can index all of them consistently.
         size_t reference_output_tensor = 0;
         if (!meta.final_outputs.empty()) {
             reference_output_tensor = *meta.final_outputs.begin();
@@ -695,6 +808,16 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
         int64_t const tiles_w = CeilDiv(out_w, subgraph.granularity.width);
         int64_t const tiles_h = CeilDiv(out_h, subgraph.granularity.height);
         int64_t const num_spatial_tiles = tiles_w * tiles_h;
+        for (size_t out_tensor_idx : meta.final_outputs) {
+            int64_t const curr_w = problem.tensors[out_tensor_idx].width;
+            int64_t const curr_h = problem.tensors[out_tensor_idx].height;
+            int64_t const curr_tiles_w = CeilDiv(curr_w, subgraph.granularity.width);
+            int64_t const curr_tiles_h = CeilDiv(curr_h, subgraph.granularity.height);
+            if (curr_tiles_w * curr_tiles_h != num_spatial_tiles) {
+                return absl::InvalidArgumentError(
+                    "CostModel: inconsistent final output tile counts in one subgraph");
+            }
+        }
 
         auto traversal_order_or = BuildTraversalOrder(problem, subgraph, reference_output_tensor);
         if (!traversal_order_or.ok()) {
@@ -710,8 +833,11 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
         bool has_final_matmul = false;
         std::set<size_t> split_k_output_tensors;
 
+        // We use the same split-k traversal for all final outputs, so we must check they are
+        // compatible
         for (size_t out_tensor_idx : meta.final_outputs) {
             int const p_op_idx = producer_op[out_tensor_idx];
+            // Defensive guard for malformed producer maps.
             if (p_op_idx < 0) {
                 continue;
             }
@@ -728,6 +854,8 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
             if (split_k_full == 1) {
                 split_k_full = curr_full_k;
             } else if (split_k_full != curr_full_k) {
+                // When multiple final outputs come from different matmuls with different K, we
+                // cannot fully compute all the outputs
                 return absl::InvalidArgumentError(
                     "CostModel: inconsistent final MatMul reduction sizes in one subgraph");
             }
@@ -747,9 +875,9 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
         // What we intend to keep across this subgraph boundary.
         std::set<size_t> retained_for_next =
             BuildNextRetainedSet(problem, subgraph, meta, prev_retained_tensors);
-        std::set<size_t> retained_for_next_lookup = retained_for_next;
 
         // Slices kept only across adjacent steps inside current subgraph.
+        // This captures short-term reuse from traversal locality and split-k accumulation.
         TilesByTensor transient_resident;
 
         SubgraphLatency subgraph_latency = 0.0;
@@ -765,6 +893,7 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
 
                 if (has_final_matmul) {
                     k_start = k_step_idx * subgraph.granularity.depth;
+                    // Tail split-k chunk can be smaller when full_k is not divisible by depth.
                     k_size = std::min<int64_t>(subgraph.granularity.depth, split_k_full - k_start);
                 }
 
@@ -772,7 +901,6 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
                 StepRequirements const reqs =
                     CollectStepRequirements(problem, subgraph, meta, producer_op, spatial_tile_idx,
                                             tiles_w, k_start, k_size);
-
                 // Arithmetic component for this step.
                 double const step_compute_time =
                     ComputeStepComputeTime(problem, subgraph, reqs.op_requirements);
@@ -795,15 +923,14 @@ auto CostModel::estimate(const Problem& problem, const Solution& solution)
                 // Suppress write for retained outputs and intermediate split-k accumulations.
                 TilesByTensor write_outputs;
                 for (const auto& [tensor_idx, tiles] : reqs.required_boundary_outputs) {
-                    if (retained_for_next_lookup.contains(tensor_idx)) {
+                    if (retained_for_next.contains(tensor_idx)) {
                         continue;
                     }
                     if (locked_split_k_output_tensors.contains(tensor_idx) && !is_last_k_step) {
                         continue;
                     }
-
-                    auto& out_tiles = write_outputs[tensor_idx];
-                    out_tiles.insert(out_tiles.end(), tiles.begin(), tiles.end());
+                    auto& write_tiles = write_outputs[tensor_idx];
+                    write_tiles.insert(write_tiles.end(), tiles.begin(), tiles.end());
                 }
 
                 int64_t const memory_out_elements = ComputeMapArea(write_outputs);

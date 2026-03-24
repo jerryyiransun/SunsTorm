@@ -73,6 +73,10 @@ TEST(TileTest, ComputeNonOverlappingArea_DifferentTensorsDoNotOverlap) {
     EXPECT_EQ(mlsys::Tile::ComputeNonOverlappingArea(tiles), 200);
 }
 
+TEST(CostModelTest, Example1A_Golden) {
+    ExpectExampleMatches("example-1-input.json", "example-1-output-A.json");
+}
+
 TEST(CostModelTest, Example1B_Golden) {
     ExpectExampleMatches("example-1-input.json", "example-1-output-B.json");
 }
@@ -81,12 +85,28 @@ TEST(CostModelTest, Example1C_Golden) {
     ExpectExampleMatches("example-1-input.json", "example-1-output-C.json");
 }
 
+TEST(CostModelTest, Example2A_Golden) {
+    ExpectExampleMatches("example-2-input.json", "example-2-output-A.json");
+}
+
 TEST(CostModelTest, Example2B_Golden) {
     ExpectExampleMatches("example-2-input.json", "example-2-output-B.json");
 }
 
+TEST(CostModelTest, Example3A_Golden) {
+    ExpectExampleMatches("example-3-input.json", "example-3-output-A.json");
+}
+
+TEST(CostModelTest, Example3B_Golden) {
+    ExpectExampleMatches("example-3-input.json", "example-3-output-B.json");
+}
+
 TEST(CostModelTest, Example3C_Golden) {
     ExpectExampleMatches("example-3-input.json", "example-3-output-C.json");
+}
+
+TEST(CostModelTest, Example4A_Golden) {
+    ExpectExampleMatches("example-4-input.json", "example-4-output-A.json");
 }
 
 TEST(CostModelTest, Example4B_Golden) {
@@ -276,6 +296,51 @@ TEST(CostModelTest, RetainedBoundaryTensorRemovesReload) {
 
     EXPECT_NEAR(std::get<1>(estimated_no_retain.value()), 6553.6, 1e-6);
     EXPECT_NEAR(std::get<1>(estimated_retain.value()), 3276.8, 1e-6);
+}
+
+TEST(CostModelTest, BoundaryOutputConsumedInsideAndOutsideIsWrittenBack) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 input
+        {.width = 128, .height = 128}, // t1 shared boundary output
+        {.width = 128, .height = 128}, // t2 final output of sg0
+        {.width = 128, .height = 128}, // t3 final output of sg1
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1}, // op0
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 1}, // op1 (inside sg0)
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {3}, .base_cost = 1}, // op2 (in sg1)
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100; // Memory-bound to expose writeback accounting.
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg0;
+    sg0.ops = {0, 1};
+    sg0.tensors_to_retain = {};
+    sg0.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg0.traversal_order = std::nullopt;
+    sg0.subgraph_latency = 0.0;
+
+    mlsys::Subgraph sg1;
+    sg1.ops = {2};
+    sg1.tensors_to_retain = {};
+    sg1.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg1.traversal_order = std::nullopt;
+    sg1.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg0, sg1}};
+
+    mlsys::CostModel cost_model;
+    auto estimated = cost_model.estimate(problem, solution);
+    ASSERT_TRUE(estimated.ok()) << estimated.status().message();
+
+    // sg0 must write both t2 (final output) and t1 (escapes subgraph via op2 in sg1):
+    // sg0: (read t0 + write t1 + write t2) / 100 = (16384 * 3) / 100 = 491.52
+    // sg1: (read t1 + write t3) / 100 = (16384 * 2) / 100 = 327.68
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 491.52, 1e-6);
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[1].subgraph_latency, 327.68, 1e-6);
+    EXPECT_NEAR(std::get<1>(estimated.value()), 819.2, 1e-6);
 }
 
 TEST(CostModelTest, RasterTraversalReuseIsEnabledByDefault) {
