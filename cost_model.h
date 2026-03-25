@@ -23,20 +23,23 @@ class Tile {
     int64_t y1;
 
     // Returns tile area in tensor elements. Degenerate ranges return 0.
-    auto area() const -> int64_t;
+    [[nodiscard]] auto area() const -> int64_t;
 
     // Computes exact union area across all tiles using per-tensor sweep-line.
     // Tiles from different tensors are never merged together.
-    static auto ComputeNonOverlappingArea(const std::vector<Tile>& tiles) -> int64_t;
+    static auto compute_non_overlapping_area(const std::vector<Tile>& tiles) -> int64_t;
 };
 
 class CostModel {
   public:
+    CostModel(Problem problem) { problem_ = problem; };
     // Estimates each subgraph latency and returns:
     // 1) updated solution with subgraph_latency filled in
     // 2) total latency across subgraphs
-    auto estimate(const Problem& problem, const Solution& solution)
-        -> StatusOr<std::tuple<Solution, SubgraphLatency>>;
+    auto estimate(const Solution& solution) -> StatusOr<std::tuple<Solution, SubgraphLatency>>;
+
+  private:
+    Problem problem_;
 };
 
 } // namespace mlsys

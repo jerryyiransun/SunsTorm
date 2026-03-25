@@ -1,3 +1,4 @@
+#include <memory>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -18,8 +19,9 @@ void ExpectExampleMatches(const std::string& input_file, const std::string& outp
     auto solution = mlsys::ReadSolution(TestDataPath(output_file));
     ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    mlsys::CostModel cost_model;
-    auto estimated = cost_model.estimate(problem.value(), solution.value());
+    std::unique_ptr<mlsys::CostModel> cost_model_ptr =
+        std::make_unique<mlsys::CostModel>(problem.value());
+    auto estimated = cost_model_ptr->estimate(solution.value());
     ASSERT_TRUE(estimated.ok()) << estimated.status().message();
 
     const auto& estimated_solution = std::get<0>(estimated.value());
@@ -38,7 +40,7 @@ void ExpectExampleMatches(const std::string& input_file, const std::string& outp
 }
 
 TEST(TileTest, ComputeNonOverlappingArea_Empty) {
-    EXPECT_EQ(mlsys::Tile::ComputeNonOverlappingArea({}), 0);
+    EXPECT_EQ(mlsys::Tile::compute_non_overlapping_area({}), 0);
 }
 
 TEST(TileTest, ComputeNonOverlappingArea_FullOverlapSingleTensor) {
@@ -46,7 +48,7 @@ TEST(TileTest, ComputeNonOverlappingArea_FullOverlapSingleTensor) {
         {.tensor_idx = 0, .x0 = 0, .x1 = 10, .y0 = 0, .y1 = 10},
         {.tensor_idx = 0, .x0 = 0, .x1 = 10, .y0 = 0, .y1 = 10},
     };
-    EXPECT_EQ(mlsys::Tile::ComputeNonOverlappingArea(tiles), 100);
+    EXPECT_EQ(mlsys::Tile::compute_non_overlapping_area(tiles), 100);
 }
 
 TEST(TileTest, ComputeNonOverlappingArea_PartialOverlapSingleTensor) {
@@ -54,7 +56,7 @@ TEST(TileTest, ComputeNonOverlappingArea_PartialOverlapSingleTensor) {
         {.tensor_idx = 0, .x0 = 0, .x1 = 10, .y0 = 0, .y1 = 10},
         {.tensor_idx = 0, .x0 = 5, .x1 = 15, .y0 = 0, .y1 = 10},
     };
-    EXPECT_EQ(mlsys::Tile::ComputeNonOverlappingArea(tiles), 150);
+    EXPECT_EQ(mlsys::Tile::compute_non_overlapping_area(tiles), 150);
 }
 
 TEST(TileTest, ComputeNonOverlappingArea_EdgeTouchNoOverlap) {
@@ -62,7 +64,7 @@ TEST(TileTest, ComputeNonOverlappingArea_EdgeTouchNoOverlap) {
         {.tensor_idx = 0, .x0 = 0, .x1 = 10, .y0 = 0, .y1 = 10},
         {.tensor_idx = 0, .x0 = 10, .x1 = 20, .y0 = 0, .y1 = 10},
     };
-    EXPECT_EQ(mlsys::Tile::ComputeNonOverlappingArea(tiles), 200);
+    EXPECT_EQ(mlsys::Tile::compute_non_overlapping_area(tiles), 200);
 }
 
 TEST(TileTest, ComputeNonOverlappingArea_DifferentTensorsDoNotOverlap) {
@@ -70,7 +72,7 @@ TEST(TileTest, ComputeNonOverlappingArea_DifferentTensorsDoNotOverlap) {
         {.tensor_idx = 0, .x0 = 0, .x1 = 10, .y0 = 0, .y1 = 10},
         {.tensor_idx = 1, .x0 = 0, .x1 = 10, .y0 = 0, .y1 = 10},
     };
-    EXPECT_EQ(mlsys::Tile::ComputeNonOverlappingArea(tiles), 200);
+    EXPECT_EQ(mlsys::Tile::compute_non_overlapping_area(tiles), 200);
 }
 
 TEST(CostModelTest, Example1A_Golden) {
@@ -137,8 +139,8 @@ TEST(CostModelTest, SmallTileBelowNativeKeepsFullComputePerStep) {
 
     mlsys::Solution solution{.subgraphs = {sg}};
 
-    mlsys::CostModel cost_model;
-    auto estimated = cost_model.estimate(problem, solution);
+    std::unique_ptr<mlsys::CostModel> cost_model_ptr = std::make_unique<mlsys::CostModel>(problem);
+    auto estimated = cost_model_ptr->estimate(solution);
     ASSERT_TRUE(estimated.ok()) << estimated.status().message();
 
     EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 4000.0, 1e-6);
@@ -166,8 +168,8 @@ TEST(CostModelTest, SplitKNonDivisibleScalesFinalChunkCompute) {
 
     mlsys::Solution solution{.subgraphs = {sg}};
 
-    mlsys::CostModel cost_model;
-    auto estimated = cost_model.estimate(problem, solution);
+    std::unique_ptr<mlsys::CostModel> cost_model_ptr = std::make_unique<mlsys::CostModel>(problem);
+    auto estimated = cost_model_ptr->estimate(solution);
     ASSERT_TRUE(estimated.ok()) << estimated.status().message();
 
     EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 1000.0, 1e-3);
@@ -197,8 +199,8 @@ TEST(CostModelTest, EphemeralIntermediateHasNoSlowMemoryTransferCost) {
 
     mlsys::Solution solution{.subgraphs = {sg}};
 
-    mlsys::CostModel cost_model;
-    auto estimated = cost_model.estimate(problem, solution);
+    std::unique_ptr<mlsys::CostModel> cost_model_ptr = std::make_unique<mlsys::CostModel>(problem);
+    auto estimated = cost_model_ptr->estimate(solution);
     ASSERT_TRUE(estimated.ok()) << estimated.status().message();
 
     EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 3276.8, 1e-6);
@@ -241,9 +243,9 @@ TEST(CostModelTest, RetainingEphemeralTensorHasNoCrossSubgraphEffect) {
     mlsys::Solution no_retain{.subgraphs = {sg0_no_retain, sg1}};
     mlsys::Solution retain_ephemeral{.subgraphs = {sg0_retain_ephemeral, sg1}};
 
-    mlsys::CostModel cost_model;
-    auto estimated_no_retain = cost_model.estimate(problem, no_retain);
-    auto estimated_retain = cost_model.estimate(problem, retain_ephemeral);
+    std::unique_ptr<mlsys::CostModel> cost_model_ptr = std::make_unique<mlsys::CostModel>(problem);
+    auto estimated_no_retain = cost_model_ptr->estimate(no_retain);
+    auto estimated_retain = cost_model_ptr->estimate(retain_ephemeral);
 
     ASSERT_TRUE(estimated_no_retain.ok()) << estimated_no_retain.status().message();
     ASSERT_TRUE(estimated_retain.ok()) << estimated_retain.status().message();
@@ -287,9 +289,9 @@ TEST(CostModelTest, RetainedBoundaryTensorRemovesReload) {
     sg0_retain.tensors_to_retain = {1};
     mlsys::Solution retain_boundary{.subgraphs = {sg0_retain, sg1}};
 
-    mlsys::CostModel cost_model;
-    auto estimated_no_retain = cost_model.estimate(problem, no_retain);
-    auto estimated_retain = cost_model.estimate(problem, retain_boundary);
+    std::unique_ptr<mlsys::CostModel> cost_model_ptr = std::make_unique<mlsys::CostModel>(problem);
+    auto estimated_no_retain = cost_model_ptr->estimate(no_retain);
+    auto estimated_retain = cost_model_ptr->estimate(retain_boundary);
 
     ASSERT_TRUE(estimated_no_retain.ok()) << estimated_no_retain.status().message();
     ASSERT_TRUE(estimated_retain.ok()) << estimated_retain.status().message();
@@ -331,8 +333,8 @@ TEST(CostModelTest, BoundaryOutputConsumedInsideAndOutsideIsWrittenBack) {
 
     mlsys::Solution solution{.subgraphs = {sg0, sg1}};
 
-    mlsys::CostModel cost_model;
-    auto estimated = cost_model.estimate(problem, solution);
+    std::unique_ptr<mlsys::CostModel> cost_model_ptr = std::make_unique<mlsys::CostModel>(problem);
+    auto estimated = cost_model_ptr->estimate(solution);
     ASSERT_TRUE(estimated.ok()) << estimated.status().message();
 
     // sg0 must write both t2 (final output) and t1 (escapes subgraph via op2 in sg1):
@@ -366,8 +368,9 @@ TEST(CostModelTest, RasterTraversalReuseIsEnabledByDefault) {
 
     mlsys::Solution solution{.subgraphs = {sg}};
 
-    mlsys::CostModel cost_model;
-    auto estimated = cost_model.estimate(problem, solution);
+    std::unique_ptr<mlsys::CostModel> cost_model_ptr = std::make_unique<mlsys::CostModel>(problem);
+    auto estimated = cost_model_ptr->estimate(solution);
+
     ASSERT_TRUE(estimated.ok()) << estimated.status().message();
 
     EXPECT_NEAR(std::get<1>(estimated.value()), 7096.0, 1e-6);
