@@ -345,6 +345,38 @@ TEST(CostModelTest, BoundaryOutputConsumedInsideAndOutsideIsWrittenBack) {
     EXPECT_NEAR(std::get<1>(estimated.value()), 819.2, 1e-6);
 }
 
+TEST(CostModelTest, RetainedPureOutputInFinalSubgraphStillWritesBack) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 input
+        {.width = 128, .height = 128}, // t1 pure output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1}, // op0
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100; // Memory-bound to expose writeback accounting.
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {1};
+    sg.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+    ASSERT_TRUE(estimated.ok()) << estimated.status().message();
+
+    // Final subgraph must still flush required boundary outputs even if retained:
+    // (read t0 + write t1) / 100 = (16384 * 2) / 100 = 327.68
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 327.68, 1e-6);
+    EXPECT_NEAR(std::get<1>(estimated.value()), 327.68, 1e-6);
+}
+
 TEST(CostModelTest, RasterTraversalReuseIsEnabledByDefault) {
     mlsys::Problem problem;
     problem.tensors = {

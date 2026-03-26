@@ -723,6 +723,19 @@ auto Tile::compute_non_overlapping_area(const std::vector<Tile>& tiles) -> int64
     return total_area;
 }
 
+CostModel::CostModel(Problem problem)
+    : problem_(std::move(problem)), producer_op_(BuildProducerMap(problem_)),
+      consumers_by_tensor_(BuildConsumersMap(problem_)) {
+    for (size_t t_idx = 0; t_idx < problem_.tensors.size(); ++t_idx) {
+        if (producer_op_[t_idx] < 0) {
+            pure_input_tensors_.insert(t_idx);
+        }
+        if (consumers_by_tensor_[t_idx].empty()) {
+            pure_output_tensors_.insert(t_idx);
+        }
+    }
+}
+
 // Estimates all subgraph latencies for a proposed solution and returns
 // both the updated solution and total latency.
 //
@@ -734,14 +747,15 @@ auto Tile::compute_non_overlapping_area(const std::vector<Tile>& tiles) -> int64
 // Ephemeral tensors are excluded from slow-memory fetch/write accounting.
 auto CostModel::estimate(const Solution& solution)
     -> StatusOr<std::tuple<Solution, SubgraphLatency>> {
-    if (problem_.slow_memory_bandwidth <= 0) {
+    const Problem& problem = problem_;
+    if (problem.slow_memory_bandwidth <= 0) {
         return absl::InvalidArgumentError("CostModel: slow_memory_bandwidth must be positive");
     }
 
     // tensor -> producer op index
-    std::vector<int> const producer_op = BuildProducerMap(problem_);
+    std::vector<int> const producer_op = BuildProducerMap(problem);
     // tensor -> all consumer op indices
-    std::vector<std::vector<size_t>> const consumers_by_tensor = BuildConsumersMap(problem_);
+    std::vector<std::vector<size_t>> const consumers_by_tensor = BuildConsumersMap(problem);
 
     Solution estimated_solution = solution;
     SubgraphLatency total_latency = 0.0;
@@ -765,7 +779,7 @@ auto CostModel::estimate(const Solution& solution)
         }
 
         // Classify tensor roles for this subgraph.
-        SubgraphMeta meta = BuildSubgraphMeta(problem_, subgraph, consumers_by_tensor);
+        SubgraphMeta meta = BuildSubgraphMeta(problem, subgraph, consumers_by_tensor_);
 
         // Refine boundary outputs with schedule-aware recomputation behavior.
         // A produced tensor must escape only if:
@@ -773,9 +787,9 @@ auto CostModel::estimate(const Solution& solution)
         // 2) some future consumer needs it before a local recomputation.
         meta.boundary_outputs.clear();
         for (size_t t_idx : meta.produced) {
-            bool const graph_output = consumers_by_tensor[t_idx].empty();
+            bool const graph_output = pure_output_tensors_.contains(t_idx);
             bool const needed_for_future_consumer = NeedsBoundaryCarryForFutureConsumer(
-                problem_, estimated_solution, producer_op, t_idx, sg_idx);
+                problem, estimated_solution, producer_op_, t_idx, sg_idx);
             if (graph_output || needed_for_future_consumer) {
                 meta.boundary_outputs.insert(t_idx);
             }
@@ -836,7 +850,7 @@ auto CostModel::estimate(const Solution& solution)
         // We use the same split-k traversal for all final outputs, so we must check they are
         // compatible
         for (size_t out_tensor_idx : meta.final_outputs) {
-            int const p_op_idx = producer_op[out_tensor_idx];
+            int const p_op_idx = producer_op_[out_tensor_idx];
             // Defensive guard for malformed producer maps.
             if (p_op_idx < 0) {
                 continue;
@@ -899,7 +913,7 @@ auto CostModel::estimate(const Solution& solution)
 
                 // Backward-propagated tile requirements for this exact (spatial,k) step.
                 StepRequirements const reqs =
-                    CollectStepRequirements(problem_, subgraph, meta, producer_op, spatial_tile_idx,
+                    CollectStepRequirements(problem, subgraph, meta, producer_op_, spatial_tile_idx,
                                             tiles_w, k_start, k_size);
                 // Arithmetic component for this step.
                 double const step_compute_time =
@@ -918,13 +932,19 @@ auto CostModel::estimate(const Solution& solution)
                     ComputeMissingArea(reqs.required_boundary_inputs, resident_at_step);
 
                 bool const is_last_k_step = (k_step_idx == (num_k_steps - 1));
+                bool const is_final_subgraph = (sg_idx + 1 == estimated_solution.subgraphs.size());
 
                 // Boundary outputs written this step.
                 // Suppress write for retained outputs and intermediate split-k accumulations.
                 TilesByTensor write_outputs;
                 for (const auto& [tensor_idx, tiles] : reqs.required_boundary_outputs) {
                     if (retained_for_next.contains(tensor_idx)) {
-                        continue;
+                        // TODO: Check if we only care about this if it is final subgraph
+                        bool const force_write_final_subgraph_pure_output =
+                            is_final_subgraph && pure_output_tensors_.contains(tensor_idx);
+                        if (!force_write_final_subgraph_pure_output) {
+                            continue;
+                        }
                     }
                     if (locked_split_k_output_tensors.contains(tensor_idx) && !is_last_k_step) {
                         continue;

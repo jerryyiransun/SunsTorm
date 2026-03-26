@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <set>
+#include <tuple>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -32,7 +34,8 @@ class Tile {
 
 class CostModel {
   public:
-    CostModel(Problem problem) { problem_ = problem; };
+    explicit CostModel(Problem problem);
+
     // Estimates each subgraph latency and returns:
     // 1) updated solution with subgraph_latency filled in
     // 2) total latency across subgraphs
@@ -40,6 +43,10 @@ class CostModel {
 
   private:
     Problem problem_;
+    std::vector<int> producer_op_;
+    std::vector<std::vector<size_t>> consumers_by_tensor_;
+    std::set<size_t> pure_input_tensors_;
+    std::set<size_t> pure_output_tensors_;
 };
 
 } // namespace mlsys
