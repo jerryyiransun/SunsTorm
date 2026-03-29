@@ -377,6 +377,82 @@ TEST(CostModelTest, RetainedPureOutputInFinalSubgraphStillWritesBack) {
     EXPECT_NEAR(std::get<1>(estimated.value()), 327.68, 1e-6);
 }
 
+TEST(CostModelTest, CacheHitIsFetched_StatsIncrease) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem, true);
+
+    auto first = cost_model.estimate(solution);
+    ASSERT_TRUE(first.ok()) << first.status().message();
+    auto stats_after_first = cost_model.cache_stats();
+    EXPECT_EQ(stats_after_first.hits, 0);
+    EXPECT_EQ(stats_after_first.misses, 1);
+    EXPECT_EQ(stats_after_first.estimate_subgraph_calls, 1);
+
+    auto second = cost_model.estimate(solution);
+    ASSERT_TRUE(second.ok()) << second.status().message();
+    auto stats_after_second = cost_model.cache_stats();
+
+    EXPECT_EQ(stats_after_second.hits, 1);
+    EXPECT_EQ(stats_after_second.misses, 1);
+    EXPECT_EQ(stats_after_second.estimate_subgraph_calls, 1);
+
+    EXPECT_NEAR(std::get<1>(first.value()), std::get<1>(second.value()), 1e-6);
+}
+
+TEST(CostModelTest, CacheStatsDisabled_DefaultNoTracking) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto first = cost_model.estimate(solution);
+    ASSERT_TRUE(first.ok()) << first.status().message();
+    auto second = cost_model.estimate(solution);
+    ASSERT_TRUE(second.ok()) << second.status().message();
+
+    auto stats = cost_model.cache_stats();
+    EXPECT_EQ(stats.hits, 0);
+    EXPECT_EQ(stats.misses, 0);
+    EXPECT_EQ(stats.estimate_subgraph_calls, 0);
+}
+
 TEST(CostModelTest, RasterTraversalReuseIsEnabledByDefault) {
     mlsys::Problem problem;
     problem.tensors = {
