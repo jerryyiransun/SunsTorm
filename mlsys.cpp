@@ -344,6 +344,9 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             }
         }
     }
+#ifdef DEBUG
+    std::cout << "[DEBUG] All assertions passed\n";
+#endif
 
     // Identify tensors that are not produced by any op
     std::vector<int> producer_op(

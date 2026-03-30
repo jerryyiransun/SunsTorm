@@ -42,3 +42,7 @@ jobs:
       - name: Run evaluate_test
         run: |
           ./build/evaluate_test
+
+      - name: Run cost_model_test
+        run: |
+          ./build/cost_model_test

@@ -119,7 +119,7 @@ auto BaseSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
 auto BruteForceSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
     unique_ptr<BruteForceFuser> fuser = make_unique<BruteForceFuser>();
     unique_ptr<Tiler> tiler = make_unique<Tiler>();
-    unique_ptr<CostModel> cost_model = make_unique<CostModel>();
+    unique_ptr<CostModel> cost_model = make_unique<CostModel>(problem);
 
     auto fusion_plans = fuser->fuse(problem);
     if (!fusion_plans.ok()) {
@@ -135,7 +135,7 @@ auto BruteForceSolver::solve(const Problem& problem) -> absl::StatusOr<Solution>
     for (const auto& plan : fusion_plans.value()) {
         auto tiled_plan = tiler->tile(problem, plan);
 
-        auto solu = cost_model->estimate(problem, tiled_plan.value());
+        auto solu = cost_model->estimate(tiled_plan.value());
 
         if (optimal_plan == tuple<Solution, SubgraphLatency>() ||
             get<1>(solu.value()) < get<1>(optimal_plan)) {
