@@ -134,6 +134,10 @@ auto BruteForceSolver::solve(const Problem& problem) -> absl::StatusOr<Solution>
 
     for (const auto& plan : fusion_plans.value()) {
         auto tiled_plan = tiler->tile(problem, plan);
+        if (!tiled_plan.ok()) {
+            // tile() returns an error when no valid tiling is available
+            continue;
+        }
 
         auto solu = cost_model->estimate(tiled_plan.value());
 
