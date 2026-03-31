@@ -41,7 +41,7 @@ auto main(int argc, char* argv[]) -> int {
     }
     const Solution& solution = solution_status.value();
 
-// #ifdef DEBUG
+    // #ifdef DEBUG
     auto eval_status = Evaluate(problem, solution);
     if (eval_status.ok()) {
         std::cout << "Evaluation successful.\n";
@@ -49,7 +49,7 @@ auto main(int argc, char* argv[]) -> int {
     } else {
         std::cerr << "Error evaluating solution: " << eval_status.status().message() << "\n";
     }
-// #endif
+    // #endif
 
     // Write the output
     auto write_status = WriteSolution(solution, output_path);

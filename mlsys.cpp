@@ -482,8 +482,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             // If the tensor has no producer op (it's a global input),
             // or if its producer lives outside the current subgraph, we've reached a
             // subgraph boundary and should stop the backward walk here.
-            if (op_idx == -1 ||
-                !subgraph_ops.contains(static_cast<size_t>(op_idx))) {
+            if (op_idx == -1 || !subgraph_ops.contains(static_cast<size_t>(op_idx))) {
 #ifdef DEBUG
                 std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx
                           << " req_w=" << curr_tensor_dim.width
