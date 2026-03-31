@@ -363,6 +363,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 
     for (size_t i = 0; i < solution.subgraphs.size(); ++i) {
         const auto& subgraph = solution.subgraphs[i];
+        std::set<size_t> subgraph_ops(subgraph.ops.begin(), subgraph.ops.end());
 
         // --- Dependency Check ---
         for (size_t const op_idx : subgraph.ops) {
@@ -479,13 +480,16 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             int const op_idx = producer_op[curr_tensor_idx];
 
             // If the tensor has no producer op (it's a global input),
-            // we don't need to trace its dependencies further in this subgraph pass
-            if (op_idx == -1) {
+            // or if its producer lives outside the current subgraph, we've reached a
+            // subgraph boundary and should stop the backward walk here.
+            if (op_idx == -1 ||
+                !subgraph_ops.contains(static_cast<size_t>(op_idx))) {
 #ifdef DEBUG
                 std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx
                           << " req_w=" << curr_tensor_dim.width
                           << " req_h=" << curr_tensor_dim.height << " is_final=" << is_final
-                          << " from OP -1 (Global Input)\n";
+                          << (op_idx == -1 ? " from OP -1 (Global Input)\n"
+                                           : " reached subgraph boundary\n");
 #endif
                 continue;
             }
