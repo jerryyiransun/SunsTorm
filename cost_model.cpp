@@ -750,8 +750,10 @@ auto CostModel::build_subgraph_cache_key(const Subgraph& subgraph,
         key += ",";
     }
 
+    std::vector<size_t> sorted_tensors_to_retain = subgraph.tensors_to_retain;
+    std::sort(sorted_tensors_to_retain.begin(), sorted_tensors_to_retain.end());
     key += "|retain:";
-    for (size_t tensor_idx : subgraph.tensors_to_retain) {
+    for (size_t tensor_idx : sorted_tensors_to_retain) {
         key += std::to_string(tensor_idx);
         key += ",";
     }
@@ -775,8 +777,11 @@ auto CostModel::build_subgraph_cache_key(const Subgraph& subgraph,
         }
     }
 
+    std::vector<size_t> sorted_prev_retained(prev_retained_tensors.begin(),
+                                             prev_retained_tensors.end());
+    std::sort(sorted_prev_retained.begin(), sorted_prev_retained.end());
     key += "|prev:";
-    for (size_t tensor_idx : prev_retained_tensors) {
+    for (size_t tensor_idx : sorted_prev_retained) {
         key += std::to_string(tensor_idx);
         key += ",";
     }
