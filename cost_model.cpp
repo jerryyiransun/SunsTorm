@@ -738,40 +738,6 @@ auto CostModel::cache_stats() const -> CacheStats {
     };
 }
 
-auto CostModel::SubgraphCacheKeyHash::operator()(
-    const CostModel::SubgraphCacheKey& key) const noexcept -> size_t {
-    auto hash_combine = [](size_t& seed, size_t value) {
-        seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-    };
-
-    size_t seed = 0;
-
-    for (size_t op_idx : key.ops) {
-        hash_combine(seed, std::hash<size_t>{}(op_idx));
-    }
-
-    for (size_t tensor_idx : key.tensors_to_retain) {
-        hash_combine(seed, std::hash<size_t>{}(tensor_idx));
-    }
-
-    hash_combine(seed, std::hash<int64_t>{}(key.granularity.width));
-    hash_combine(seed, std::hash<int64_t>{}(key.granularity.height));
-    hash_combine(seed, std::hash<int64_t>{}(key.granularity.depth));
-
-    hash_combine(seed, std::hash<bool>{}(key.traversal_order.has_value()));
-    if (key.traversal_order.has_value()) {
-        for (int64_t idx : key.traversal_order.value()) {
-            hash_combine(seed, std::hash<int64_t>{}(idx));
-        }
-    }
-
-    for (size_t tensor_idx : key.prev_retained_tensors) {
-        hash_combine(seed, std::hash<size_t>{}(tensor_idx));
-    }
-
-    return seed;
-}
-
 auto CostModel::build_subgraph_cache_key(const Subgraph& subgraph,
                                          const std::set<size_t>& prev_retained_tensors) const
     -> SubgraphCacheKey {

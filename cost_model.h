@@ -2,12 +2,13 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include "absl/hash/hash.h"
 #include "absl/status/statusor.h"
 #include "mlsys.h"
 
@@ -61,10 +62,12 @@ class CostModel {
         std::vector<size_t> prev_retained_tensors;
 
         bool operator==(const SubgraphCacheKey& other) const = default;
-    };
 
-    struct SubgraphCacheKeyHash {
-        auto operator()(const SubgraphCacheKey& key) const noexcept -> size_t;
+        template <typename H> friend auto AbslHashValue(H h, const SubgraphCacheKey& key) -> H {
+            return H::combine(std::move(h), key.ops, key.tensors_to_retain, key.granularity.width,
+                              key.granularity.height, key.granularity.depth, key.traversal_order,
+                              key.prev_retained_tensors);
+        }
     };
 
     auto estimate_subgraph(const Solution& solution, size_t sg_idx,
@@ -83,7 +86,7 @@ class CostModel {
     std::vector<std::vector<size_t>> consumers_by_tensor_;
     std::set<size_t> pure_input_tensors_;
     std::set<size_t> pure_output_tensors_;
-    std::unordered_map<SubgraphCacheKey, SubgraphLatency, SubgraphCacheKeyHash>
+    std::unordered_map<SubgraphCacheKey, SubgraphLatency, absl::Hash<SubgraphCacheKey>>
         subgraph_latency_cache_;
     bool enable_cache_stats_ = false;
     uint64_t cache_hits_ = 0;
