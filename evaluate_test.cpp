@@ -215,7 +215,7 @@ TEST(TilerTest, SingleMatMulCanBeTiledToFitFastMemory) {
     sg.tensors_to_retain = {};
     solution.subgraphs = {sg};
 
-    mlsys::Tiler tiler;
+    mlsys::BruteForceTiler tiler;
     auto tiled = tiler.tile(problem, solution);
     ASSERT_TRUE(tiled.ok()) << tiled.status().message();
 
@@ -249,7 +249,33 @@ TEST(TilerTest, Benchmark1BaselinePartitionHasValidTiling) {
         solution.subgraphs.push_back(sg);
     }
 
-    mlsys::Tiler tiler;
+    mlsys::BruteForceTiler tiler;
+    auto tiled = tiler.tile(problem, solution);
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, GreedyTilerStillFindsValidTiling) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 512, .height = 512},
+        {.width = 512, .height = 512},
+        {.width = 512, .height = 512},
+    };
+    problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
+    problem.fast_memory_capacity = 60'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    solution.subgraphs = {sg};
+
+    mlsys::GreedyTiler tiler;
     auto tiled = tiler.tile(problem, solution);
     ASSERT_TRUE(tiled.ok()) << tiled.status().message();
 

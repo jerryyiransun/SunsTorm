@@ -293,7 +293,7 @@ auto FitsFastMemory(const Problem& problem, const Solution& solution, size_t sg_
 
 } // namespace
 
-auto Tiler::tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> {
+auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> {
     Solution tiled_solution = solution;
     std::vector<int> producer_op = BuildProducerMap(problem);
     std::set<size_t> prev_retained_tensors;
@@ -361,6 +361,46 @@ auto Tiler::tile(const Problem& problem, const Solution& solution) -> StatusOr<S
 
         sg.granularity = best_granularity;
         best_granularity_cache_[cache_key] = best_granularity;
+        prev_retained_tensors =
+            std::set<size_t>(sg.tensors_to_retain.begin(), sg.tensors_to_retain.end());
+    }
+
+    return tiled_solution;
+}
+
+auto GreedyTiler::tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> {
+    Solution tiled_solution = solution;
+    std::vector<int> producer_op = BuildProducerMap(problem);
+    std::set<size_t> prev_retained_tensors;
+
+    for (size_t sg_idx = 0; sg_idx < tiled_solution.subgraphs.size(); ++sg_idx) {
+        auto& sg = tiled_solution.subgraphs[sg_idx];
+        sg.granularity.width = problem.native_granularity.width;
+        sg.granularity.height = problem.native_granularity.height;
+        sg.granularity.depth = MaxMatMulDepth(problem, sg);
+
+        while (
+            !FitsFastMemory(problem, tiled_solution, sg_idx, prev_retained_tensors, producer_op)) {
+            int64_t const w = sg.granularity.width;
+            int64_t const h = sg.granularity.height;
+            int64_t const k = sg.granularity.depth;
+            int64_t const max_dim = std::max({w, h, k});
+
+            if (max_dim <= 1) {
+                return absl::ResourceExhaustedError(
+                    "Cannot fit working set even at minimum tile size");
+            }
+
+            // Match the previous strategy: always shrink the largest active dimension.
+            if (k == max_dim) {
+                sg.granularity.depth = (k + 1) / 2;
+            } else if (w == max_dim) {
+                sg.granularity.width = (w + 1) / 2;
+            } else {
+                sg.granularity.height = (h + 1) / 2;
+            }
+        }
+
         prev_retained_tensors =
             std::set<size_t>(sg.tensors_to_retain.begin(), sg.tensors_to_retain.end());
     }

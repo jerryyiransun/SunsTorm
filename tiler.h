@@ -14,10 +14,21 @@ namespace mlsys {
 
 class Tiler {
   public:
-    auto tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution>;
+    virtual ~Tiler() = default;
+    virtual auto tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> = 0;
+};
+
+class BruteForceTiler : public Tiler {
+  public:
+    auto tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> override;
 
   private:
     std::unordered_map<std::string, std::optional<Granularity>> best_granularity_cache_;
+};
+
+class GreedyTiler : public Tiler {
+  public:
+    auto tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> override;
 };
 
 } // namespace mlsys

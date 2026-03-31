@@ -118,7 +118,7 @@ auto BaseSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
 
 auto BruteForceSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
     unique_ptr<BruteForceFuser> fuser = make_unique<BruteForceFuser>();
-    unique_ptr<Tiler> tiler = make_unique<Tiler>();
+    unique_ptr<Tiler> tiler = make_unique<BruteForceTiler>();
     unique_ptr<CostModel> cost_model = make_unique<CostModel>(problem);
 
     auto fusion_plans = fuser->fuse(problem);
