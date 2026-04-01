@@ -1,8 +1,11 @@
+#include <algorithm>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "mlsys.h"
+#include "tiler.h"
 
 namespace {
 
@@ -192,6 +195,92 @@ TEST(EvaluateTest, TraversalOrder_LengthMismatch_Fail) {
     EXPECT_NE(std::string(result.status().message()).find("[Invalid Traversal Order]"),
               std::string::npos)
         << result.status().message();
+}
+
+TEST(TilerTest, SingleMatMulCanBeTiledToFitFastMemory) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 512, .height = 512},
+        {.width = 512, .height = 512},
+        {.width = 512, .height = 512},
+    };
+    problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
+    problem.fast_memory_capacity = 60'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    solution.subgraphs = {sg};
+
+    mlsys::BruteForceTiler tiler;
+    auto tiled = tiler.tile(problem, solution);
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, Benchmark1BaselinePartitionHasValidTiling) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 512, .height = 512}, {.width = 512, .height = 512}, {.width = 512, .height = 512},
+        {.width = 512, .height = 512}, {.width = 512, .height = 512}, {.width = 512, .height = 512},
+        {.width = 512, .height = 512}, {.width = 512, .height = 512}, {.width = 512, .height = 512},
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {4}, .base_cost = 2000},
+        {.op_type = "Pointwise", .inputs = {4}, .outputs = {5}, .base_cost = 500},
+        {.op_type = "MatMul", .inputs = {5, 2}, .outputs = {6}, .base_cost = 2000},
+        {.op_type = "MatMul", .inputs = {6, 3}, .outputs = {7}, .base_cost = 2000},
+        {.op_type = "Pointwise", .inputs = {7, 0}, .outputs = {8}, .base_cost = 500},
+    };
+    problem.fast_memory_capacity = 60'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Solution solution;
+    for (size_t op_idx = 0; op_idx < problem.ops.size(); ++op_idx) {
+        mlsys::Subgraph sg;
+        sg.ops = {op_idx};
+        sg.tensors_to_retain = {};
+        solution.subgraphs.push_back(sg);
+    }
+
+    mlsys::BruteForceTiler tiler;
+    auto tiled = tiler.tile(problem, solution);
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, GreedyTilerStillFindsValidTiling) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 512, .height = 512},
+        {.width = 512, .height = 512},
+        {.width = 512, .height = 512},
+    };
+    problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
+    problem.fast_memory_capacity = 60'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    solution.subgraphs = {sg};
+
+    mlsys::GreedyTiler tiler;
+    auto tiled = tiler.tile(problem, solution);
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
 }
 
 } // namespace
