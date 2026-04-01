@@ -21,4 +21,9 @@ class BruteForceSolver : public Solver {
     auto solve(const Problem& problem) -> StatusOr<Solution> override;
 };
 
+class HeuristicSolver : public Solver {
+  public:
+    auto solve(const Problem& problem) -> StatusOr<Solution> override;
+};
+
 } // namespace mlsys
