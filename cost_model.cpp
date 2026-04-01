@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <map>
 #include <set>
-#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -741,46 +740,15 @@ auto CostModel::cache_stats() const -> CacheStats {
 
 auto CostModel::build_subgraph_cache_key(const Subgraph& subgraph,
                                          const std::set<size_t>& prev_retained_tensors) const
-    -> std::string {
-    std::string key;
-
-    key += "ops:";
-    for (size_t op_idx : subgraph.ops) {
-        key += std::to_string(op_idx);
-        key += ",";
-    }
-
-    key += "|retain:";
-    for (size_t tensor_idx : subgraph.tensors_to_retain) {
-        key += std::to_string(tensor_idx);
-        key += ",";
-    }
-
-    key += "|gran:";
-    key += std::to_string(subgraph.granularity.width);
-    key += ",";
-    key += std::to_string(subgraph.granularity.height);
-    key += ",";
-    key += std::to_string(subgraph.granularity.depth);
-
-    key += "|traversal:";
-    if (!subgraph.traversal_order.has_value()) {
-        key += "none";
-    } else {
-        key += std::to_string(subgraph.traversal_order.value().size());
-        key += ":";
-        for (int64_t idx : subgraph.traversal_order.value()) {
-            key += std::to_string(idx);
-            key += ",";
-        }
-    }
-
-    key += "|prev:";
-    for (size_t tensor_idx : prev_retained_tensors) {
-        key += std::to_string(tensor_idx);
-        key += ",";
-    }
-
+    -> SubgraphCacheKey {
+    SubgraphCacheKey key;
+    key.ops = subgraph.ops;
+    key.tensors_to_retain = subgraph.tensors_to_retain;
+    std::sort(key.tensors_to_retain.begin(), key.tensors_to_retain.end());
+    key.granularity = subgraph.granularity;
+    key.traversal_order = subgraph.traversal_order;
+    key.prev_retained_tensors.assign(prev_retained_tensors.begin(), prev_retained_tensors.end());
+    std::sort(key.prev_retained_tensors.begin(), key.prev_retained_tensors.end());
     return key;
 }
 
@@ -1051,7 +1019,8 @@ auto CostModel::estimate(const Solution& solution)
     for (size_t sg_idx = 0; sg_idx < estimated_solution.subgraphs.size(); ++sg_idx) {
         Subgraph& subgraph = estimated_solution.subgraphs[sg_idx];
 
-        std::string const cache_key = build_subgraph_cache_key(subgraph, prev_retained_tensors);
+        SubgraphCacheKey const cache_key =
+            build_subgraph_cache_key(subgraph, prev_retained_tensors);
 
         SubgraphLatency subgraph_latency = 0.0;
         auto cache_it = subgraph_latency_cache_.find(cache_key);
