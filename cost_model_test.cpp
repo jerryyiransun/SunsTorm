@@ -300,11 +300,11 @@ TEST(CostModelTest, RetainedBoundaryTensorRemovesReload) {
     EXPECT_NEAR(std::get<1>(estimated_retain.value()), 3276.8, 1e-6);
 }
 
-TEST(CostModelTest, BoundaryOutputConsumedInsideAndOutsideIsWrittenBack) {
+TEST(CostModelTest, TensorConsumedInsideSameSubgraphDoesNotForceWriteback) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 128, .height = 128}, // t0 input
-        {.width = 128, .height = 128}, // t1 shared boundary output
+        {.width = 128, .height = 128}, // t1 shared intermediate
         {.width = 128, .height = 128}, // t2 final output of sg0
         {.width = 128, .height = 128}, // t3 final output of sg1
     };
@@ -337,12 +337,12 @@ TEST(CostModelTest, BoundaryOutputConsumedInsideAndOutsideIsWrittenBack) {
     auto estimated = cost_model_ptr->estimate(solution);
     ASSERT_TRUE(estimated.ok()) << estimated.status().message();
 
-    // sg0 must write both t2 (final output) and t1 (escapes subgraph via op2 in sg1):
-    // sg0: (read t0 + write t1 + write t2) / 100 = (16384 * 3) / 100 = 491.52
+    // t1 is consumed inside sg0, so it remains ephemeral and does not force writeback.
+    // sg0: (read t0 + write t2) / 100 = (16384 * 2) / 100 = 327.68
     // sg1: (read t1 + write t3) / 100 = (16384 * 2) / 100 = 327.68
-    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 491.52, 1e-6);
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 327.68, 1e-6);
     EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[1].subgraph_latency, 327.68, 1e-6);
-    EXPECT_NEAR(std::get<1>(estimated.value()), 819.2, 1e-6);
+    EXPECT_NEAR(std::get<1>(estimated.value()), 655.36, 1e-6);
 }
 
 TEST(CostModelTest, RetainedPureOutputInFinalSubgraphStillWritesBack) {

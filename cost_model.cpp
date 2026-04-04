@@ -787,8 +787,10 @@ auto CostModel::compute_retained_for_next_subgraph(
     SubgraphMeta meta = BuildSubgraphMeta(problem_, subgraph, consumers_by_tensor_);
 
     // Refine boundary outputs with schedule-aware recomputation behavior.
+    // Only final outputs can escape a subgraph boundary; tensors consumed internally remain
+    // ephemeral unless explicitly retained.
     meta.boundary_outputs.clear();
-    for (size_t t_idx : meta.produced) {
+    for (size_t t_idx : meta.final_outputs) {
         bool const graph_output = pure_output_tensors_.contains(t_idx);
         bool const needed_for_future_consumer =
             NeedsBoundaryCarryForFutureConsumer(problem_, solution, producer_op_, t_idx, sg_idx);
@@ -836,11 +838,11 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
     SubgraphMeta meta = BuildSubgraphMeta(problem, subgraph, consumers_by_tensor_);
 
     // Refine boundary outputs with schedule-aware recomputation behavior.
-    // A produced tensor must escape only if:
+    // A final output tensor must escape only if:
     // 1) it is a graph output, or
     // 2) some future consumer needs it before a local recomputation.
     meta.boundary_outputs.clear();
-    for (size_t t_idx : meta.produced) {
+    for (size_t t_idx : meta.final_outputs) {
         bool const graph_output = pure_output_tensors_.contains(t_idx);
         bool const needed_for_future_consumer =
             NeedsBoundaryCarryForFutureConsumer(problem, solution, producer_op_, t_idx, sg_idx);
