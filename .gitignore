@@ -3,3 +3,4 @@ build-*/
 out.json
 md_plans/
 .vscode/
+.codex
