@@ -1,43 +1,14 @@
 #include <memory>
-#include <string>
 
 #include <gtest/gtest.h>
 
 #include "cost_model.h"
 #include "mlsys.h"
+#include "test_utils.h"
 
 namespace {
 
-std::string TestDataPath(const std::string& filename) {
-    return std::string(TEST_DATA_DIR) + "/" + filename;
-}
-
-void ExpectExampleMatches(const std::string& input_file, const std::string& output_file) {
-    auto problem = mlsys::ReadProblem(TestDataPath(input_file));
-    ASSERT_TRUE(problem.ok()) << problem.status().message();
-
-    auto solution = mlsys::ReadSolution(TestDataPath(output_file));
-    ASSERT_TRUE(solution.ok()) << solution.status().message();
-
-    std::unique_ptr<mlsys::CostModel> cost_model_ptr =
-        std::make_unique<mlsys::CostModel>(problem.value());
-    auto estimated = cost_model_ptr->estimate(solution.value());
-    ASSERT_TRUE(estimated.ok()) << estimated.status().message();
-
-    const auto& estimated_solution = std::get<0>(estimated.value());
-    const auto& expected_solution = solution.value();
-
-    ASSERT_EQ(estimated_solution.subgraphs.size(), expected_solution.subgraphs.size());
-
-    double expected_total = 0.0;
-    for (size_t i = 0; i < expected_solution.subgraphs.size(); ++i) {
-        EXPECT_NEAR(estimated_solution.subgraphs[i].subgraph_latency,
-                    expected_solution.subgraphs[i].subgraph_latency, 1e-6);
-        expected_total += expected_solution.subgraphs[i].subgraph_latency;
-    }
-
-    EXPECT_NEAR(std::get<1>(estimated.value()), expected_total, 1e-6);
-}
+using mlsys::test::ExpectExampleMatches;
 
 TEST(TileTest, ComputeNonOverlappingArea_Empty) {
     EXPECT_EQ(mlsys::Tile::compute_non_overlapping_area({}), 0);

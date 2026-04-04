@@ -39,10 +39,6 @@ jobs:
           cmake -B build
           cmake --build build -j$(nproc)
           
-      - name: Run evaluate_test
+      - name: Run test suite
         run: |
-          ./build/evaluate_test
-
-      - name: Run cost_model_test
-        run: |
-          ./build/cost_model_test
+          ctest --test-dir build --output-on-failure

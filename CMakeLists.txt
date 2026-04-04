@@ -48,27 +48,28 @@ target_link_libraries(mlsys_lib PUBLIC
 add_executable(mlsys main.cpp)
 target_link_libraries(mlsys PRIVATE mlsys_lib)
 
-# Define the evaluate_test executable
-add_executable(evaluate_test evaluate_test.cpp)
-target_link_libraries(evaluate_test PRIVATE mlsys_lib GTest::gtest_main)
-target_compile_definitions(evaluate_test PRIVATE
-    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples"
-)
 include(GoogleTest)
-gtest_discover_tests(evaluate_test)
 
-# Define the cost_model_test executable
-add_executable(cost_model_test cost_model_test.cpp)
-target_link_libraries(cost_model_test PRIVATE mlsys_lib GTest::gtest_main)
-target_compile_definitions(cost_model_test PRIVATE
-    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples"
-)
-gtest_discover_tests(cost_model_test)
+function(add_mlsys_test target)
+    add_executable(${target} ${ARGN})
+    target_link_libraries(${target} PRIVATE mlsys_lib GTest::gtest_main)
+    target_compile_definitions(${target} PRIVATE
+        TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples"
+    )
+    gtest_discover_tests(${target})
+endfunction()
+
+add_mlsys_test(evaluate_test evaluate_test.cpp)
+add_mlsys_test(tiler_test tiler_test.cpp)
+add_mlsys_test(fuser_test fuser_test.cpp)
+add_mlsys_test(cost_model_test cost_model_test.cpp)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(mlsys_lib PRIVATE DEBUG)
     target_compile_definitions(mlsys PRIVATE DEBUG)
     target_compile_definitions(evaluate_test PRIVATE DEBUG)
+    target_compile_definitions(tiler_test PRIVATE DEBUG)
+    target_compile_definitions(fuser_test PRIVATE DEBUG)
     target_compile_definitions(cost_model_test PRIVATE DEBUG)
 endif()
 
