@@ -191,7 +191,8 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 #ifdef DEBUG
     std::cout << "\n[DEBUG] Starting Evaluate Function\n";
 #endif
-    std::vector<bool> inputs_satisfied(problem.tensors.size(), true);
+    std::vector<bool> inputs_satisfied_global(problem.tensors.size(), true);
+    std::vector<bool> inputs_satisfied_retained(problem.tensors.size(), false);
 
     // Use assertions to check the problem is valid
     for (size_t i = 0; i < problem.ops.size(); i++) {
@@ -351,10 +352,11 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
     // Identify tensors that are not produced by any op
     std::vector<int> producer_op(
         problem.tensors.size(), -1); // producer_op[i] is the index of the op that produces tensor i
+    std::vector<bool> produced_outputs(problem.tensors.size(), false);
     for (size_t i = 0; i < problem.ops.size(); ++i) {
         size_t const out = problem.ops[i].outputs[0];
-        inputs_satisfied[out] = false; // if the tensor is an output then it does not have its
-                                       // inputs satisfied before any operations are complete
+        inputs_satisfied_global[out] =
+            false; // produced tensors are unavailable until a valid subgraph completes
         producer_op[out] = i;
     }
 
@@ -364,23 +366,50 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
     for (size_t i = 0; i < solution.subgraphs.size(); ++i) {
         const auto& subgraph = solution.subgraphs[i];
         std::set<size_t> subgraph_ops(subgraph.ops.begin(), subgraph.ops.end());
+        std::set<size_t> subgraph_produced;
+        std::set<size_t> subgraph_consumed;
+        std::set<size_t> final_output_tensors;
 
-        // --- Dependency Check ---
         for (size_t const op_idx : subgraph.ops) {
             if (op_idx >= problem.ops.size()) {
                 return absl::InvalidArgumentError(
                     "[Invalid Op Index] Invalid op index in subgraph");
             }
 
+            size_t const out = problem.ops[op_idx].outputs[0];
+            subgraph_produced.insert(out);
+
             for (size_t const in : problem.ops[op_idx].inputs) {
-                if (!inputs_satisfied[in]) {
+                subgraph_consumed.insert(in);
+            }
+        }
+
+        for (size_t const t_idx : subgraph_produced) {
+            if (!subgraph_consumed.contains(t_idx)) {
+                final_output_tensors.insert(t_idx);
+            }
+        }
+
+        // --- Dependency Check ---
+        std::vector<bool> inputs_satisfied_local(problem.tensors.size(), false);
+        for (size_t const op_idx : subgraph.ops) {
+            for (size_t const in : problem.ops[op_idx].inputs) {
+                bool const input_available = inputs_satisfied_global[in] ||
+                                             inputs_satisfied_retained[in] ||
+                                             inputs_satisfied_local[in];
+                if (!input_available) {
                     return absl::FailedPreconditionError(
                         "[Unmet Dependency] Dependency not met for tensor " + std::to_string(in));
                 }
             }
 
             size_t const out = problem.ops[op_idx].outputs[0];
-            inputs_satisfied[out] = true;
+            inputs_satisfied_local[out] = true;
+            produced_outputs[out] = true;
+        }
+
+        for (size_t const t_idx : final_output_tensors) {
+            inputs_satisfied_global[t_idx] = true;
         }
 
         // --- Fast Memory Capacity Check ---
@@ -406,20 +435,8 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
         // Queue of tensors to process in the form of (tensor_id, required_width, required_height,
         // is_final_output_or_retained)
         std::vector<std::tuple<size_t, Tensor, bool>> q;
-        std::set<size_t> subgraph_produced;
-        std::set<size_t> subgraph_consumed;
         std::set<size_t> to_be_retained_tensors(subgraph.tensors_to_retain.begin(),
                                                 subgraph.tensors_to_retain.end());
-        std::set<size_t> final_output_tensors;
-
-        for (size_t const op_idx : subgraph.ops) {
-            size_t const out = problem.ops[op_idx].outputs[0];
-            subgraph_produced.insert(out);
-
-            for (size_t const in : problem.ops[op_idx].inputs) {
-                subgraph_consumed.insert(in);
-            }
-        }
 
         // Account for tensors retained by this subgraph (can include outputs or loaded inputs).
         for (size_t const t_idx : to_be_retained_tensors) {
@@ -645,14 +662,16 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 
         // Update retained tensors for next subgraph
         prev_retained_tensors.clear();
+        std::fill(inputs_satisfied_retained.begin(), inputs_satisfied_retained.end(), false);
         for (size_t const t : subgraph.tensors_to_retain) {
             prev_retained_tensors.insert(t);
+            inputs_satisfied_retained[t] = true;
         }
     }
 
     // --- All Operations Done Check ---
     for (size_t i = 0; i < problem.tensors.size(); ++i) {
-        if (!inputs_satisfied[i]) {
+        if (producer_op[i] != -1 && !produced_outputs[i]) {
             return absl::FailedPreconditionError("[Missed Output] Output " + std::to_string(i) +
                                                  " was not produced");
         }

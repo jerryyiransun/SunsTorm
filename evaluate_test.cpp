@@ -197,6 +197,258 @@ TEST(EvaluateTest, TraversalOrder_LengthMismatch_Fail) {
         << result.status().message();
 }
 
+TEST(EvaluateTest, SameSubgraphChainPassesWithEphemeralInputs) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // input
+        {.width = 64, .height = 64}, // intermediate
+        {.width = 64, .height = 64}  // output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+    solution.subgraphs = {sg};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+}
+
+TEST(EvaluateTest, SameSubgraphFanOutPassesWithEphemeralInputs) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // input
+        {.width = 64, .height = 64}, // shared intermediate
+        {.width = 64, .height = 64}, // branch output
+        {.width = 64, .height = 64}  // branch output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {3}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1, 2};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+    solution.subgraphs = {sg};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+}
+
+TEST(EvaluateTest, CrossSubgraphCannotUseInternalIntermediate) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // input
+        {.width = 64, .height = 64}, // internal intermediate
+        {.width = 64, .height = 64}, // final output of subgraph 0
+        {.width = 64, .height = 64}  // output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {3}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg0;
+    sg0.ops = {0, 1};
+    sg0.tensors_to_retain = {};
+    sg0.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg0.traversal_order = std::nullopt;
+    sg0.subgraph_latency = 1.0;
+
+    mlsys::Subgraph sg1;
+    sg1.ops = {2};
+    sg1.tensors_to_retain = {};
+    sg1.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg1.traversal_order = std::nullopt;
+    sg1.subgraph_latency = 1.0;
+    solution.subgraphs = {sg0, sg1};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Unmet Dependency]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, RetainedTensorExpiresAfterImmediateNextSubgraph) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // input
+        {.width = 64, .height = 64}, // retained internal tensor
+        {.width = 64, .height = 64}, // subgraph 0 final output
+        {.width = 64, .height = 64}, // subgraph 1 output
+        {.width = 64, .height = 64}  // output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1, 2}, .outputs = {3}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1, 3}, .outputs = {4}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg0;
+    sg0.ops = {0, 1};
+    sg0.tensors_to_retain = {1};
+    sg0.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg0.traversal_order = std::nullopt;
+    sg0.subgraph_latency = 1.0;
+
+    mlsys::Subgraph sg1;
+    sg1.ops = {2};
+    sg1.tensors_to_retain = {};
+    sg1.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg1.traversal_order = std::nullopt;
+    sg1.subgraph_latency = 1.0;
+
+    mlsys::Subgraph sg2;
+    sg2.ops = {3};
+    sg2.tensors_to_retain = {};
+    sg2.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg2.traversal_order = std::nullopt;
+    sg2.subgraph_latency = 1.0;
+    solution.subgraphs = {sg0, sg1, sg2};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Unmet Dependency]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, RetainedTensorCanBeReRetainedForLaterSubgraph) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // input
+        {.width = 64, .height = 64}, // retained internal tensor
+        {.width = 64, .height = 64}, // subgraph 0 final output
+        {.width = 64, .height = 64}, // subgraph 1 output
+        {.width = 64, .height = 64}  // output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1, 2}, .outputs = {3}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1, 3}, .outputs = {4}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg0;
+    sg0.ops = {0, 1};
+    sg0.tensors_to_retain = {1};
+    sg0.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg0.traversal_order = std::nullopt;
+    sg0.subgraph_latency = 1.0;
+
+    mlsys::Subgraph sg1;
+    sg1.ops = {2};
+    sg1.tensors_to_retain = {1};
+    sg1.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg1.traversal_order = std::nullopt;
+    sg1.subgraph_latency = 1.0;
+
+    mlsys::Subgraph sg2;
+    sg2.ops = {3};
+    sg2.tensors_to_retain = {};
+    sg2.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg2.traversal_order = std::nullopt;
+    sg2.subgraph_latency = 1.0;
+    solution.subgraphs = {sg0, sg1, sg2};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+}
+
+TEST(EvaluateTest, MissedOutputCheckIgnoresInternalIntermediates) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // input
+        {.width = 64, .height = 64}, // internal intermediate
+        {.width = 64, .height = 64}  // output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+    solution.subgraphs = {sg};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+}
+
+TEST(EvaluateTest, OmittedOpStillFailsWithMissedOutput) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // input
+        {.width = 64, .height = 64}, // intermediate
+        {.width = 64, .height = 64}  // output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+    solution.subgraphs = {sg};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Missed Output]"),
+              std::string::npos)
+        << result.status().message();
+}
+
 TEST(TilerTest, SingleMatMulCanBeTiledToFitFastMemory) {
     mlsys::Problem problem;
     problem.tensors = {

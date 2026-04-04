@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <map>
+#include <sstream>
 #include <set>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -69,6 +72,29 @@ struct StepRequirements {
 auto CeilDiv(int64_t a, int64_t b) -> int64_t {
     return (a + b - 1) / b;
 }
+
+#ifdef DEBUG
+template <typename T>
+auto FormatVector(const std::vector<T>& values) -> std::string {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t idx = 0; idx < values.size(); ++idx) {
+        if (idx > 0) {
+            oss << ", ";
+        }
+        oss << values[idx];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+auto FormatTraversalOrder(const std::optional<TraversalOrder>& traversal_order) -> std::string {
+    if (!traversal_order.has_value()) {
+        return "nullopt";
+    }
+    return FormatVector(*traversal_order);
+}
+#endif
 
 // Adds a tile into a tensor-indexed tile map if tile has non-zero area.
 void AddTile(TilesByTensor& map, const Tile& tile) {
@@ -761,8 +787,10 @@ auto CostModel::compute_retained_for_next_subgraph(
     SubgraphMeta meta = BuildSubgraphMeta(problem_, subgraph, consumers_by_tensor_);
 
     // Refine boundary outputs with schedule-aware recomputation behavior.
+    // Only final outputs can escape a subgraph boundary; tensors consumed internally remain
+    // ephemeral unless explicitly retained.
     meta.boundary_outputs.clear();
-    for (size_t t_idx : meta.produced) {
+    for (size_t t_idx : meta.final_outputs) {
         bool const graph_output = pure_output_tensors_.contains(t_idx);
         bool const needed_for_future_consumer =
             NeedsBoundaryCarryForFutureConsumer(problem_, solution, producer_op_, t_idx, sg_idx);
@@ -810,11 +838,11 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
     SubgraphMeta meta = BuildSubgraphMeta(problem, subgraph, consumers_by_tensor_);
 
     // Refine boundary outputs with schedule-aware recomputation behavior.
-    // A produced tensor must escape only if:
+    // A final output tensor must escape only if:
     // 1) it is a graph output, or
     // 2) some future consumer needs it before a local recomputation.
     meta.boundary_outputs.clear();
-    for (size_t t_idx : meta.produced) {
+    for (size_t t_idx : meta.final_outputs) {
         bool const graph_output = pure_output_tensors_.contains(t_idx);
         bool const needed_for_future_consumer =
             NeedsBoundaryCarryForFutureConsumer(problem, solution, producer_op_, t_idx, sg_idx);
@@ -1021,6 +1049,22 @@ auto CostModel::estimate(const Solution& solution)
 
         SubgraphCacheKey const cache_key =
             build_subgraph_cache_key(subgraph, prev_retained_tensors);
+#ifdef DEBUG
+        auto const format_subgraph_cache_key = [](const auto& key) -> std::string {
+            std::ostringstream oss;
+            oss << "{ops=" << FormatVector(key.ops)
+                << ", tensors_to_retain=" << FormatVector(key.tensors_to_retain)
+                << ", granularity={width=" << key.granularity.width
+                << ", height=" << key.granularity.height << ", depth=" << key.granularity.depth
+                << "}"
+                << ", traversal_order=" << FormatTraversalOrder(key.traversal_order)
+                << ", prev_retained_tensors=" << FormatVector(key.prev_retained_tensors) << "}";
+            return oss.str();
+        };
+        std::string const cache_key_debug = format_subgraph_cache_key(cache_key);
+        std::cout << "[DEBUG] evaluate() current SubgraphCacheKey for subgraph " << sg_idx << ": "
+                  << cache_key_debug << "\n";
+#endif
 
         SubgraphLatency subgraph_latency = 0.0;
         auto cache_it = subgraph_latency_cache_.find(cache_key);
@@ -1029,7 +1073,15 @@ auto CostModel::estimate(const Solution& solution)
                 ++cache_hits_;
             }
             subgraph_latency = cache_it->second;
+#ifdef DEBUG
+            std::cout << "[DEBUG] Cache hit for subgraph " << sg_idx << " with SubgraphCacheKey "
+                      << cache_key_debug << "; cached latency=" << subgraph_latency << "\n";
+#endif
         } else {
+#ifdef DEBUG
+            std::cout << "[DEBUG] Cache miss for subgraph " << sg_idx << " with SubgraphCacheKey "
+                      << cache_key_debug << "\n";
+#endif
             if (enable_cache_stats_) {
                 ++cache_misses_;
                 ++estimate_subgraph_calls_;
@@ -1042,6 +1094,10 @@ auto CostModel::estimate(const Solution& solution)
             }
             subgraph_latency = subgraph_latency_or.value();
             subgraph_latency_cache_[cache_key] = subgraph_latency;
+#ifdef DEBUG
+            std::cout << "[DEBUG] Added SubgraphCacheKey to cache for subgraph " << sg_idx << ": "
+                      << cache_key_debug << "; computed latency=" << subgraph_latency << "\n";
+#endif
         }
 
         subgraph.subgraph_latency = subgraph_latency;
