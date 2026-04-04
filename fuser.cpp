@@ -5,6 +5,103 @@
 
 namespace mlsys {
 
+namespace {
+
+auto BuildProducerOpIndex(const Problem& problem) -> std::vector<int> {
+    std::vector<int> producer_op(problem.tensors.size(), -1);
+    for (size_t op_idx = 0; op_idx < problem.ops.size(); ++op_idx) {
+        for (size_t output_tensor : problem.ops[op_idx].outputs) {
+            producer_op[output_tensor] = static_cast<int>(op_idx);
+        }
+    }
+    return producer_op;
+}
+
+auto CanIncludeOp(const Problem& problem, const std::vector<int>& producer_op, size_t op_idx,
+                  const std::vector<char>& covered_ops,
+                  const std::vector<char>& selected_ops) -> bool {
+    for (size_t input_tensor : problem.ops[op_idx].inputs) {
+        int const producer = producer_op[input_tensor];
+        if (producer >= 0 && !covered_ops[producer] && !selected_ops[producer]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void EnumerateSubgraphCandidates(const Problem& problem, const std::vector<int>& producer_op,
+                                 const std::vector<char>& covered_ops, size_t op_idx,
+                                 std::vector<char>& selected_ops,
+                                 std::vector<size_t>& current_subgraph, bool introduces_new_op,
+                                 std::vector<std::vector<size_t>>& candidates) {
+    if (op_idx == problem.ops.size()) {
+        if (!current_subgraph.empty() && introduces_new_op) {
+            candidates.push_back(current_subgraph);
+        }
+        return;
+    }
+
+    EnumerateSubgraphCandidates(problem, producer_op, covered_ops, op_idx + 1, selected_ops,
+                                current_subgraph, introduces_new_op, candidates);
+
+    if (!CanIncludeOp(problem, producer_op, op_idx, covered_ops, selected_ops)) {
+        return;
+    }
+
+    current_subgraph.push_back(op_idx);
+    selected_ops[op_idx] = true;
+    EnumerateSubgraphCandidates(problem, producer_op, covered_ops, op_idx + 1, selected_ops,
+                                current_subgraph, introduces_new_op || !covered_ops[op_idx],
+                                candidates);
+    selected_ops[op_idx] = false;
+    current_subgraph.pop_back();
+}
+
+auto BuildSchedulableSubgraphCandidates(const Problem& problem,
+                                        const std::vector<int>& producer_op,
+                                        const std::vector<char>& covered_ops)
+    -> std::vector<std::vector<size_t>> {
+    std::vector<std::vector<size_t>> candidates;
+    std::vector<char> selected_ops(problem.ops.size(), false);
+    std::vector<size_t> current_subgraph;
+    EnumerateSubgraphCandidates(problem, producer_op, covered_ops, 0, selected_ops,
+                                current_subgraph, false, candidates);
+    return candidates;
+}
+
+void EnumerateSchedules(const Problem& problem, const std::vector<int>& producer_op,
+                        std::vector<char>& covered_ops, size_t covered_count,
+                        std::vector<std::vector<size_t>>& current_schedule,
+                        std::vector<std::vector<std::vector<size_t>>>& schedules) {
+    if (covered_count == problem.ops.size()) {
+        schedules.push_back(current_schedule);
+        return;
+    }
+
+    for (const auto& candidate :
+         BuildSchedulableSubgraphCandidates(problem, producer_op, covered_ops)) {
+        current_schedule.push_back(candidate);
+
+        std::vector<size_t> newly_covered;
+        for (size_t op_idx : candidate) {
+            if (!covered_ops[op_idx]) {
+                covered_ops[op_idx] = true;
+                newly_covered.push_back(op_idx);
+            }
+        }
+
+        EnumerateSchedules(problem, producer_op, covered_ops, covered_count + newly_covered.size(),
+                           current_schedule, schedules);
+
+        for (size_t op_idx : newly_covered) {
+            covered_ops[op_idx] = false;
+        }
+        current_schedule.pop_back();
+    }
+}
+
+} // namespace
+
 auto BruteForceFuser::fuse(const Problem& problem) -> StatusOr<std::vector<Solution>> {
     std::vector<Solution> results;
     size_t num_ops = problem.ops.size();
@@ -12,27 +109,13 @@ auto BruteForceFuser::fuse(const Problem& problem) -> StatusOr<std::vector<Solut
         return results;
     }
 
-    // Step 1: Iterate through all contiguous partitions of the ops.
-    // We can imagine placing an optional "divider" between each adjacent operation.
-    // For N operations, there are N-1 potential dividers.
-    // We represent these choices as a bitmask ranging from 0 to (2^(N-1) - 1).
-    // A bit value of 1 means "split here" (end current subgraph, start a new one).
-    // A bit value of 0 means "fuse" (keep the operation in the current subgraph).
-    size_t num_partitions = 1ULL << (num_ops - 1);
+    std::vector<int> producer_op = BuildProducerOpIndex(problem);
+    std::vector<char> covered_ops(num_ops, false);
+    std::vector<std::vector<size_t>> current_schedule;
+    std::vector<std::vector<std::vector<size_t>>> schedules;
+    EnumerateSchedules(problem, producer_op, covered_ops, 0, current_schedule, schedules);
 
-    for (size_t mask = 0; mask < num_partitions; ++mask) {
-        // Collect operations grouped into separate subgraphs based on the mask
-        std::vector<std::vector<size_t>> subgraphs_ops;
-        std::vector<size_t> current_ops;
-
-        for (size_t i = 0; i < num_ops; ++i) {
-            current_ops.push_back(i);
-            // If this is the last op, OR if the mask bit at this position says to split:
-            if (i == num_ops - 1 || (((mask >> i) & 1) != 0)) {
-                subgraphs_ops.push_back(current_ops);
-                current_ops.clear();
-            }
-        }
+    for (const auto& subgraphs_ops : schedules) {
 
         // Step 2: For each generated subgraph, find all candidate tensors to retain.
         // A tensor can only be retained by a subgraph if it's either an input to or
