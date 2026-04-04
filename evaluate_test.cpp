@@ -43,6 +43,54 @@ void ExpectFail(const std::string& input_file, const std::string& output_file,
         << "\", got: " << result.status().message();
 }
 
+auto MakeSinglePointwiseProblem(int64_t width, int64_t height) -> mlsys::Problem {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = width, .height = height},
+        {.width = width, .height = height},
+    };
+    problem.ops = {{.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100}};
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    return problem;
+}
+
+auto MakeSingleOpSolution() -> mlsys::Solution {
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.traversal_order = std::nullopt;
+    mlsys::Solution solution;
+    solution.subgraphs = {sg};
+    return solution;
+}
+
+void ExpectTraversalOrderForBothTilers(const mlsys::Problem& problem,
+                                       const mlsys::TraversalOrder& expected) {
+    {
+        mlsys::BruteForceTiler tiler;
+        auto tiled = tiler.tile(problem, MakeSingleOpSolution());
+        ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+        ASSERT_TRUE(tiled.value().subgraphs[0].traversal_order.has_value());
+        EXPECT_EQ(tiled.value().subgraphs[0].traversal_order.value(), expected);
+
+        auto eval = mlsys::Evaluate(problem, tiled.value());
+        ASSERT_TRUE(eval.ok()) << eval.status().message();
+    }
+
+    {
+        mlsys::GreedyTiler tiler;
+        auto tiled = tiler.tile(problem, MakeSingleOpSolution());
+        ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+        ASSERT_TRUE(tiled.value().subgraphs[0].traversal_order.has_value());
+        EXPECT_EQ(tiled.value().subgraphs[0].traversal_order.value(), expected);
+
+        auto eval = mlsys::Evaluate(problem, tiled.value());
+        ASSERT_TRUE(eval.ok()) << eval.status().message();
+    }
+}
+
 // ---- Example 1 ----
 
 TEST(EvaluateTest, Example1_OutputA_Pass) {
@@ -281,6 +329,26 @@ TEST(TilerTest, GreedyTilerStillFindsValidTiling) {
 
     auto eval = mlsys::Evaluate(problem, tiled.value());
     ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, WidthDominantGridUsesHorizontalSnakeOrder) {
+    auto problem = MakeSinglePointwiseProblem(384, 256); // 3x2 tiles at 128x128
+    ExpectTraversalOrderForBothTilers(problem, mlsys::TraversalOrder{0, 1, 2, 5, 4, 3});
+}
+
+TEST(TilerTest, HeightDominantGridUsesVerticalSnakeOrder) {
+    auto problem = MakeSinglePointwiseProblem(256, 384); // 2x3 tiles at 128x128
+    ExpectTraversalOrderForBothTilers(problem, mlsys::TraversalOrder{0, 2, 4, 5, 3, 1});
+}
+
+TEST(TilerTest, SquareGridUsesWidthFirstSnakeOrder) {
+    auto problem = MakeSinglePointwiseProblem(256, 256); // 2x2 tiles at 128x128
+    ExpectTraversalOrderForBothTilers(problem, mlsys::TraversalOrder{0, 1, 3, 2});
+}
+
+TEST(TilerTest, SingleTileProducesSingletonTraversalOrder) {
+    auto problem = MakeSinglePointwiseProblem(128, 128); // 1x1 tile
+    ExpectTraversalOrderForBothTilers(problem, mlsys::TraversalOrder{0});
 }
 
 } // namespace

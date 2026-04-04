@@ -48,6 +48,80 @@ auto BuildProducerMap(const Problem& problem) -> std::vector<int> {
     return producer;
 }
 
+auto BuildSnakeTraversalOrder(const Problem& problem, const Subgraph& subgraph)
+    -> std::optional<TraversalOrder> {
+    std::set<size_t> subgraph_produced;
+    std::set<size_t> subgraph_consumed;
+    for (size_t op_idx : subgraph.ops) {
+        size_t const out = problem.ops[op_idx].outputs[0];
+        subgraph_produced.insert(out);
+        for (size_t in_idx : problem.ops[op_idx].inputs) {
+            subgraph_consumed.insert(in_idx);
+        }
+    }
+
+    std::vector<size_t> final_outputs;
+    final_outputs.reserve(subgraph_produced.size());
+    for (size_t t_idx : subgraph_produced) {
+        if (!subgraph_consumed.contains(t_idx)) {
+            final_outputs.push_back(t_idx);
+        }
+    }
+
+    if (final_outputs.empty()) {
+        return std::nullopt;
+    }
+
+    auto tile_grid_for_output = [&](size_t tensor_idx) -> std::pair<int64_t, int64_t> {
+        int64_t const out_w = problem.tensors[tensor_idx].width;
+        int64_t const out_h = problem.tensors[tensor_idx].height;
+        int64_t const tiles_w =
+            (out_w + subgraph.granularity.width - 1) / subgraph.granularity.width;
+        int64_t const tiles_h =
+            (out_h + subgraph.granularity.height - 1) / subgraph.granularity.height;
+        return {tiles_w, tiles_h};
+    };
+
+    auto [tiles_w, tiles_h] = tile_grid_for_output(final_outputs[0]);
+    for (size_t out_idx : final_outputs) {
+        auto [curr_tiles_w, curr_tiles_h] = tile_grid_for_output(out_idx);
+        if (curr_tiles_w * curr_tiles_h != tiles_w * tiles_h) {
+            return std::nullopt;
+        }
+    }
+
+    TraversalOrder order;
+    order.reserve(static_cast<size_t>(tiles_w * tiles_h));
+
+    if (tiles_w >= tiles_h) {
+        for (int64_t ty = 0; ty < tiles_h; ++ty) {
+            if ((ty % 2) == 0) {
+                for (int64_t tx = 0; tx < tiles_w; ++tx) {
+                    order.push_back(ty * tiles_w + tx);
+                }
+            } else {
+                for (int64_t tx = tiles_w - 1; tx >= 0; --tx) {
+                    order.push_back(ty * tiles_w + tx);
+                }
+            }
+        }
+        return order;
+    }
+
+    for (int64_t tx = 0; tx < tiles_w; ++tx) {
+        if ((tx % 2) == 0) {
+            for (int64_t ty = 0; ty < tiles_h; ++ty) {
+                order.push_back(ty * tiles_w + tx);
+            }
+        } else {
+            for (int64_t ty = tiles_h - 1; ty >= 0; --ty) {
+                order.push_back(ty * tiles_w + tx);
+            }
+        }
+    }
+    return order;
+}
+
 // Cheap ranking heuristic for exhaustive tiling search.
 // We keep the exact CostModel at the full-plan level in the solver, but use this
 // score to compare subgraph-local tile candidates without exploding runtime.
@@ -309,6 +383,7 @@ auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> 
             }
 
             sg.granularity = *cache_it->second;
+            sg.traversal_order = BuildSnakeTraversalOrder(problem, sg);
             prev_retained_tensors =
                 std::set<size_t>(sg.tensors_to_retain.begin(), sg.tensors_to_retain.end());
             continue;
@@ -360,6 +435,7 @@ auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> 
         }
 
         sg.granularity = best_granularity;
+        sg.traversal_order = BuildSnakeTraversalOrder(problem, sg);
         best_granularity_cache_[cache_key] = best_granularity;
         prev_retained_tensors =
             std::set<size_t>(sg.tensors_to_retain.begin(), sg.tensors_to_retain.end());
@@ -401,6 +477,7 @@ auto GreedyTiler::tile(const Problem& problem, const Solution& solution) -> Stat
             }
         }
 
+        sg.traversal_order = BuildSnakeTraversalOrder(problem, sg);
         prev_retained_tensors =
             std::set<size_t>(sg.tensors_to_retain.begin(), sg.tensors_to_retain.end());
     }
