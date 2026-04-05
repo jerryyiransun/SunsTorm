@@ -11,16 +11,57 @@
 #include "tiler.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <tuple>
+#include <vector>
 
 using namespace std;
 
 namespace mlsys {
+
+namespace {
+
+struct IntervalPlan {
+    bool valid = false;
+    Subgraph subgraph;
+    double latency = 0.0;
+};
+
+auto MaxFusionWidthForProblem(size_t num_ops) -> size_t {
+    if (num_ops <= 8) {
+        return 6;
+    }
+    if (num_ops <= 20) {
+        return 5;
+    }
+    return 2;
+}
+
+auto BuildSingletonSolution(const Problem& problem) -> absl::StatusOr<Solution> {
+    Solution solution;
+    for (size_t i = 0; i < problem.ops.size(); ++i) {
+        Subgraph sg;
+        sg.ops = {i};
+        sg.tensors_to_retain = {};
+        sg.traversal_order = nullopt;
+        solution.subgraphs.push_back(sg);
+    }
+
+    GreedyTiler tiler;
+    auto tiled = tiler.tile(problem, solution);
+    if (!tiled.ok()) {
+        return tiled.status();
+    }
+    return tiled.value();
+}
+
+} // namespace
 
 auto BaseSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
     Solution solution;
@@ -87,6 +128,110 @@ auto BruteForceSolver::solve(const Problem& problem) -> absl::StatusOr<Solution>
     }
 
     return get<0>(optimal_plan);
+}
+
+auto HeuristicSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
+    size_t const num_ops = problem.ops.size();
+    if (num_ops == 0) {
+        return Solution{};
+    }
+    size_t const max_fusion_width = MaxFusionWidthForProblem(num_ops);
+
+    auto singleton_solution_status = BuildSingletonSolution(problem);
+    if (!singleton_solution_status.ok()) {
+        return singleton_solution_status.status();
+    }
+    Solution singleton_solution = singleton_solution_status.value();
+
+    CostModel cost_model(problem);
+    auto singleton_estimated = cost_model.estimate(singleton_solution);
+    if (!singleton_estimated.ok()) {
+        return singleton_estimated.status();
+    }
+    singleton_solution = get<0>(singleton_estimated.value());
+
+    std::vector<std::vector<IntervalPlan>> interval_plans(
+        num_ops, std::vector<IntervalPlan>(num_ops));
+    BruteForceTiler tiler;
+
+    for (size_t start = 0; start < num_ops; ++start) {
+        for (size_t end = start; end < num_ops && end < start + max_fusion_width; ++end) {
+            Solution local_solution;
+            Subgraph fused_subgraph;
+            fused_subgraph.tensors_to_retain = {};
+            fused_subgraph.traversal_order = nullopt;
+            for (size_t op_idx = start; op_idx <= end; ++op_idx) {
+                fused_subgraph.ops.push_back(op_idx);
+            }
+            local_solution.subgraphs = {fused_subgraph};
+
+            auto tiled_local = tiler.tile(problem, local_solution);
+            if (!tiled_local.ok()) {
+                continue;
+            }
+
+            Solution candidate_full;
+            for (size_t prefix = 0; prefix < start; ++prefix) {
+                candidate_full.subgraphs.push_back(singleton_solution.subgraphs[prefix]);
+            }
+            candidate_full.subgraphs.push_back(tiled_local.value().subgraphs[0]);
+            for (size_t suffix = end + 1; suffix < num_ops; ++suffix) {
+                candidate_full.subgraphs.push_back(singleton_solution.subgraphs[suffix]);
+            }
+
+            auto estimated = cost_model.estimate(candidate_full);
+            if (!estimated.ok()) {
+                continue;
+            }
+
+            IntervalPlan plan;
+            plan.valid = true;
+            plan.subgraph = get<0>(estimated.value()).subgraphs[start];
+            plan.latency = plan.subgraph.subgraph_latency;
+            interval_plans[start][end] = plan;
+        }
+    }
+
+    std::vector<double> dp(num_ops + 1, std::numeric_limits<double>::infinity());
+    std::vector<size_t> next_end(num_ops, num_ops);
+    dp[num_ops] = 0.0;
+
+    for (int start = static_cast<int>(num_ops) - 1; start >= 0; --start) {
+        for (size_t end = static_cast<size_t>(start);
+             end < num_ops && end < static_cast<size_t>(start) + max_fusion_width; ++end) {
+            const auto& plan = interval_plans[static_cast<size_t>(start)][end];
+            if (!plan.valid) {
+                continue;
+            }
+
+            double const candidate = plan.latency + dp[end + 1];
+            if (candidate < dp[static_cast<size_t>(start)]) {
+                dp[static_cast<size_t>(start)] = candidate;
+                next_end[static_cast<size_t>(start)] = end;
+            }
+        }
+    }
+
+    if (!std::isfinite(dp[0])) {
+        return absl::InternalError("Heuristic solver found no valid interval partition");
+    }
+
+    Solution solution;
+    for (size_t start = 0; start < num_ops;) {
+        size_t const end = next_end[start];
+        if (end >= num_ops) {
+            return absl::InternalError("Heuristic solver failed to reconstruct solution");
+        }
+        solution.subgraphs.push_back(interval_plans[start][end].subgraph);
+        start = end + 1;
+    }
+
+    auto estimated = cost_model.estimate(solution);
+    if (!estimated.ok()) {
+        return estimated.status();
+    }
+
+    return get<0>(estimated.value());
 }
 
 } // namespace mlsys
