@@ -43,6 +43,25 @@ auto MaxFusionWidthForProblem(size_t num_ops) -> size_t {
     return 2;
 }
 
+auto GreedyConfigForProblem(size_t num_ops) -> GreedyFuserConfig {
+    if (num_ops <= 4) {
+        return GreedyFuserConfig{.search_depth = 12, .beam_width = 32};
+    }
+    if (num_ops <= 8) {
+        return GreedyFuserConfig{.search_depth = 10, .beam_width = 24};
+    }
+    if (num_ops <= 16) {
+        return GreedyFuserConfig{.search_depth = 8, .beam_width = 16};
+    }
+    if (num_ops <= 32) {
+        return GreedyFuserConfig{.search_depth = 6, .beam_width = 12};
+    }
+    if (num_ops <= 64) {
+        return GreedyFuserConfig{.search_depth = 4, .beam_width = 8};
+    }
+    return GreedyFuserConfig{.search_depth = 3, .beam_width = 6};
+}
+
 auto BuildSingletonSolution(const Problem& problem) -> absl::StatusOr<Solution> {
     Solution solution;
     for (size_t i = 0; i < problem.ops.size(); ++i) {
@@ -227,6 +246,37 @@ auto HeuristicSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> 
     }
 
     auto estimated = cost_model.estimate(solution);
+    if (!estimated.ok()) {
+        return estimated.status();
+    }
+
+    return get<0>(estimated.value());
+}
+
+GreedySolver::GreedySolver()
+    : use_problem_sized_config_(true), config_{.search_depth = 0, .beam_width = 0} {}
+
+GreedySolver::GreedySolver(GreedyFuserConfig config)
+    : use_problem_sized_config_(false), config_(config) {}
+
+auto GreedySolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
+    GreedyFuserConfig const effective_config =
+        use_problem_sized_config_ ? GreedyConfigForProblem(problem.ops.size()) : config_;
+
+    GreedyFuser fuser(effective_config);
+    auto fused_solution = fuser.fuse(problem);
+    if (!fused_solution.ok()) {
+        return fused_solution.status();
+    }
+
+    GreedyTiler tiler;
+    auto tiled_solution = tiler.tile(problem, fused_solution.value());
+    if (!tiled_solution.ok()) {
+        return tiled_solution.status();
+    }
+
+    CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(tiled_solution.value());
     if (!estimated.ok()) {
         return estimated.status();
     }
