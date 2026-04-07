@@ -33,7 +33,7 @@ auto main(int argc, char* argv[]) -> int {
 #endif
 
     // Scheduling logic
-    std::unique_ptr<Solver> solver = std::make_unique<HeuristicSolver>();
+    std::unique_ptr<Solver> solver = std::make_unique<GreedySolver>();
     auto solution_status = solver->solve(problem);
     if (!solution_status.ok()) {
         std::cerr << "Error solving problem: " << solution_status.status().message() << "\n";

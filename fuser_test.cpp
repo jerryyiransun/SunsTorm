@@ -133,19 +133,17 @@ TEST(FuserTest, GreedyFindsDiamondRecomputationSchedule) {
     ExpectGreedySolutionValid(problem, *solution);
 }
 
-TEST(FuserTest, PrefusesUniqueUnaryPointwiseButNotMultiInputConsumer) {
+TEST(FuserTest, PrefuseHandlesPointwiseInsideMultiOpCurrentSubgraph) {
     mlsys::Problem problem;
     problem.tensors = {
-        {.width = 128, .height = 128},
-        {.width = 128, .height = 128},
-        {.width = 128, .height = 128},
-        {.width = 128, .height = 128},
-        {.width = 128, .height = 128},
+        {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 128, .height = 128},
+        {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 128, .height = 128},
     };
     problem.ops = {
         {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 10},
         {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 10},
-        {.op_type = "Pointwise", .inputs = {2, 3}, .outputs = {4}, .base_cost = 10},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 10},
+        {.op_type = "Pointwise", .inputs = {3, 4}, .outputs = {5}, .base_cost = 10},
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
@@ -155,9 +153,111 @@ TEST(FuserTest, PrefusesUniqueUnaryPointwiseButNotMultiInputConsumer) {
     auto solution = fuser.fuse(problem);
     ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    ASSERT_EQ(solution->subgraphs.size(), 2u);
+    ASSERT_EQ(solution->subgraphs.size(), 1u);
+    EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0, 1, 2, 3}));
+    ExpectGreedySolutionValid(problem, *solution);
+}
+
+TEST(FuserTest, PrefuseCaseBFusesPointwiseOutputIntoUniquePointwiseTarget) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 10},
+        {.op_type = "Pointwise", .inputs = {1, 2}, .outputs = {3}, .base_cost = 10},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
+    auto solution = fuser.fuse(problem);
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
+
+    ASSERT_EQ(solution->subgraphs.size(), 1u);
     EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0, 1}));
-    EXPECT_EQ(solution->subgraphs[1].ops, std::vector<size_t>({2}));
+    ExpectGreedySolutionValid(problem, *solution);
+}
+
+TEST(FuserTest, PrefuseCaseBBlocksWhenOutputHasExternalConsumer) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 128, .height = 128},
+        {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 10},
+        {.op_type = "Pointwise", .inputs = {1, 2}, .outputs = {3}, .base_cost = 10},
+        {.op_type = "Pointwise", .inputs = {1, 4}, .outputs = {5}, .base_cost = 10},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
+    auto solution = fuser.fuse(problem);
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
+
+    ASSERT_EQ(solution->subgraphs.size(), 3u);
+    EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0}));
+    EXPECT_EQ(solution->subgraphs[1].ops, std::vector<size_t>({1}));
+    EXPECT_EQ(solution->subgraphs[2].ops, std::vector<size_t>({2}));
+    ExpectGreedySolutionValid(problem, *solution);
+}
+
+TEST(FuserTest, PrefuseCaseBBlocksWhenConsumerIsNotPointwise) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 32, .height = 32},
+        {.width = 32, .height = 32},
+        {.width = 16, .height = 32},
+        {.width = 16, .height = 32},
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 10},
+        {.op_type = "MatMul", .inputs = {1, 2}, .outputs = {3}, .base_cost = 10},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 32, .height = 32, .depth = 1};
+
+    mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
+    auto solution = fuser.fuse(problem);
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
+
+    ASSERT_EQ(solution->subgraphs.size(), 2u);
+    EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0}));
+    EXPECT_EQ(solution->subgraphs[1].ops, std::vector<size_t>({1}));
+    ExpectGreedySolutionValid(problem, *solution);
+}
+
+TEST(FuserTest, PrefuseCaseAAllowsMatMulProducerForNow) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 32, .height = 32},
+        {.width = 32, .height = 32},
+        {.width = 32, .height = 32},
+        {.width = 32, .height = 32},
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 10},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 32, .height = 32, .depth = 1};
+
+    // TODO: This behavior is intentionally broad until Case-A MatMul filtering is made tiler-aware.
+    mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
+    auto solution = fuser.fuse(problem);
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
+
+    ASSERT_EQ(solution->subgraphs.size(), 1u);
+    EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0, 1}));
     ExpectGreedySolutionValid(problem, *solution);
 }
 
@@ -189,11 +289,8 @@ TEST(FuserTest, DirectMergeRemovesProducerSubgraphWhenSafe) {
 TEST(FuserTest, AvoidsInvalidDestructiveMergeWhenProducerIsStillNeeded) {
     mlsys::Problem problem;
     problem.tensors = {
-        {.width = 128, .height = 128},
-        {.width = 128, .height = 128},
-        {.width = 32, .height = 128},
-        {.width = 32, .height = 128},
-        {.width = 32, .height = 128},
+        {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 32, .height = 128},
+        {.width = 32, .height = 128},  {.width = 32, .height = 128},
     };
     problem.ops = {
         {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
@@ -240,12 +337,8 @@ TEST(FuserTest, AvoidsInvalidDestructiveMergeWhenProducerIsStillNeeded) {
 TEST(FuserTest, RetainCarriesTensorAcrossUnrelatedIntermediateSubgraph) {
     mlsys::Problem problem;
     problem.tensors = {
-        {.width = 128, .height = 128},
-        {.width = 128, .height = 128},
-        {.width = 32, .height = 128},
-        {.width = 32, .height = 128},
-        {.width = 128, .height = 128},
-        {.width = 128, .height = 128},
+        {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 32, .height = 128},
+        {.width = 32, .height = 128},  {.width = 128, .height = 128}, {.width = 128, .height = 128},
         {.width = 32, .height = 128},
     };
     problem.ops = {
@@ -272,8 +365,8 @@ TEST(FuserTest, RetainCarriesTensorAcrossUnrelatedIntermediateSubgraph) {
             continue;
         }
 
-        bool const touches_tensor =
-            SubgraphProducesTensor(problem, subgraph, 1) || SubgraphConsumesTensor(problem, subgraph, 1);
+        bool const touches_tensor = SubgraphProducesTensor(problem, subgraph, 1) ||
+                                    SubgraphConsumesTensor(problem, subgraph, 1);
         if (!touches_tensor) {
             retained_through_unrelated_subgraph = true;
             break;

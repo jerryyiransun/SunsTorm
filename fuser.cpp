@@ -188,8 +188,7 @@ auto TensorSize(const Problem& problem, size_t tensor_idx) -> int64_t {
 }
 
 auto NormalizeAndValidateSolution(const Problem& problem, const std::vector<size_t>& topo_rank,
-                                  const std::vector<int>& producer_op, Solution& solution)
-    -> bool {
+                                  const std::vector<int>& producer_op, Solution& solution) -> bool {
     for (auto& subgraph : solution.subgraphs) {
         CanonicalizeOps(subgraph.ops, topo_rank);
         CanonicalizeTensors(subgraph.tensors_to_retain);
@@ -223,7 +222,8 @@ auto NormalizeAndValidateSolution(const Problem& problem, const std::vector<size
 
             for (size_t tensor_idx : problem.ops[op_idx].inputs) {
                 bool const available = globally_available[tensor_idx] ||
-                                       retained_available[tensor_idx] || local_available[tensor_idx];
+                                       retained_available[tensor_idx] ||
+                                       local_available[tensor_idx];
                 if (!available) {
                     return false;
                 }
@@ -250,8 +250,8 @@ auto NormalizeAndValidateSolution(const Problem& problem, const std::vector<size
 
             bool const touched = produced.contains(tensor_idx) || consumed.contains(tensor_idx) ||
                                  retained_available[tensor_idx];
-            bool const available = globally_available[tensor_idx] || retained_available[tensor_idx] ||
-                                   local_available[tensor_idx];
+            bool const available = globally_available[tensor_idx] ||
+                                   retained_available[tensor_idx] || local_available[tensor_idx];
             if (touched && available) {
                 normalized_retains.push_back(tensor_idx);
             }
@@ -268,8 +268,9 @@ auto NormalizeAndValidateSolution(const Problem& problem, const std::vector<size
     return true;
 }
 
-auto BuildDirectMergeSolution(const Solution& solution, size_t producer_sg_idx, size_t consumer_sg_idx,
-                              const std::vector<size_t>& topo_rank) -> Solution {
+auto BuildDirectMergeSolution(const Solution& solution, size_t producer_sg_idx,
+                              size_t consumer_sg_idx, const std::vector<size_t>& topo_rank)
+    -> Solution {
     Solution merged_solution;
     merged_solution.subgraphs.reserve(solution.subgraphs.size() - 1);
 
@@ -298,8 +299,9 @@ auto BuildDirectMergeSolution(const Solution& solution, size_t producer_sg_idx, 
     return merged_solution;
 }
 
-auto BuildCloneFuseSolution(const Solution& solution, size_t producer_sg_idx, size_t consumer_sg_idx,
-                            const std::vector<size_t>& topo_rank) -> Solution {
+auto BuildCloneFuseSolution(const Solution& solution, size_t producer_sg_idx,
+                            size_t consumer_sg_idx, const std::vector<size_t>& topo_rank)
+    -> Solution {
     Solution cloned_solution = solution;
     Subgraph& fused_subgraph = cloned_solution.subgraphs[consumer_sg_idx];
     fused_subgraph.ops.insert(fused_subgraph.ops.end(),
@@ -343,44 +345,97 @@ auto FindLatestSubgraphContainingOp(const Solution& solution, size_t op_idx, siz
 void PrefuseUnaryUniquePointwise(const Problem& problem, const std::vector<int>& producer_op,
                                  const std::vector<std::vector<size_t>>& consumers_by_tensor,
                                  const std::vector<size_t>& topo_rank, Solution& solution) {
+    auto subgraph_contains_op = [&](const Subgraph& subgraph, size_t op_idx) -> bool {
+        return std::find(subgraph.ops.begin(), subgraph.ops.end(), op_idx) != subgraph.ops.end();
+    };
+
     while (true) {
         bool changed = false;
         for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
-            if (solution.subgraphs[sg_idx].ops.size() != 1) {
-                continue;
+            const auto& current_subgraph = solution.subgraphs[sg_idx];
+            for (size_t pointwise_op_idx : current_subgraph.ops) {
+                const Op& pointwise_op = problem.ops[pointwise_op_idx];
+                if (pointwise_op.op_type != "Pointwise" || pointwise_op.inputs.size() != 1) {
+                    continue;
+                }
+
+                // Case A: shared tensor is the unary pointwise input.
+                size_t const input_tensor = pointwise_op.inputs[0];
+                int const producer = producer_op[input_tensor];
+                if (producer >= 0) {
+                    auto producer_sg_idx = FindLatestSubgraphContainingOp(
+                        solution, static_cast<size_t>(producer), sg_idx);
+                    if (producer_sg_idx.has_value()) {
+                        // TODO: Add a tiler/cost-aware guard for MatMul->Pointwise hard pre-fuse.
+                        // Split-k behavior can make these fusions latency-regressive.
+                        Solution candidate = BuildDirectMergeSolution(
+                            solution, producer_sg_idx.value(), sg_idx, topo_rank);
+                        if (NormalizeAndValidateSolution(problem, topo_rank, producer_op,
+                                                         candidate)) {
+                            solution = std::move(candidate);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (changed) {
+                    break;
+                }
+
+                // Case B: shared tensor is the unary pointwise output.
+                size_t const output_tensor = pointwise_op.outputs[0];
+                const auto& output_consumers = consumers_by_tensor[output_tensor];
+                if (output_consumers.empty()) {
+                    continue;
+                }
+
+                bool all_consumers_pointwise = true;
+                for (size_t consumer_op_idx : output_consumers) {
+                    if (problem.ops[consumer_op_idx].op_type != "Pointwise") {
+                        all_consumers_pointwise = false;
+                        break;
+                    }
+                }
+                if (!all_consumers_pointwise) {
+                    continue;
+                }
+
+                std::optional<size_t> target_sg_idx;
+                for (size_t candidate_sg_idx = sg_idx + 1;
+                     candidate_sg_idx < solution.subgraphs.size(); ++candidate_sg_idx) {
+                    bool all_consumers_in_candidate = true;
+                    for (size_t consumer_op_idx : output_consumers) {
+                        if (!subgraph_contains_op(solution.subgraphs[candidate_sg_idx],
+                                                  consumer_op_idx)) {
+                            all_consumers_in_candidate = false;
+                            break;
+                        }
+                    }
+
+                    if (all_consumers_in_candidate) {
+                        target_sg_idx = candidate_sg_idx;
+                        break;
+                    }
+                }
+                if (!target_sg_idx.has_value()) {
+                    continue;
+                }
+
+                Solution candidate =
+                    BuildDirectMergeSolution(solution, sg_idx, target_sg_idx.value(), topo_rank);
+                if (!NormalizeAndValidateSolution(problem, topo_rank, producer_op, candidate)) {
+                    continue;
+                }
+
+                solution = std::move(candidate);
+                changed = true;
+                break;
             }
 
-            size_t const op_idx = solution.subgraphs[sg_idx].ops[0];
-            const Op& op = problem.ops[op_idx];
-            if (op.op_type != "Pointwise" || op.inputs.size() != 1) {
-                continue;
+            if (changed) {
+                break;
             }
-
-            size_t const input_tensor = op.inputs[0];
-            if (consumers_by_tensor[input_tensor].size() != 1) {
-                continue;
-            }
-
-            int const producer = producer_op[input_tensor];
-            if (producer < 0) {
-                continue;
-            }
-
-            auto producer_sg_idx =
-                FindLatestSubgraphContainingOp(solution, static_cast<size_t>(producer), sg_idx);
-            if (!producer_sg_idx.has_value()) {
-                continue;
-            }
-
-            Solution candidate =
-                BuildDirectMergeSolution(solution, producer_sg_idx.value(), sg_idx, topo_rank);
-            if (!NormalizeAndValidateSolution(problem, topo_rank, producer_op, candidate)) {
-                continue;
-            }
-
-            solution = std::move(candidate);
-            changed = true;
-            break;
         }
 
         if (!changed) {
@@ -417,11 +472,10 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
                 if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, direct_merge)) {
                     std::string const key = MakeStateKey(direct_merge);
                     if (key != parent_key && seen_keys.insert(key).second) {
-                        candidates.push_back(
-                            GreedyCandidate{.type = GreedyMoveType::kFuse,
-                                            .solution = std::move(direct_merge),
-                                            .potential_score = fuse_score,
-                                            .key = key});
+                        candidates.push_back(GreedyCandidate{.type = GreedyMoveType::kFuse,
+                                                             .solution = std::move(direct_merge),
+                                                             .potential_score = fuse_score,
+                                                             .key = key});
                     }
                 } else {
                     Solution clone_fuse =
@@ -429,11 +483,10 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
                     if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, clone_fuse)) {
                         std::string const key = MakeStateKey(clone_fuse);
                         if (key != parent_key && seen_keys.insert(key).second) {
-                            candidates.push_back(
-                                GreedyCandidate{.type = GreedyMoveType::kFuse,
-                                                .solution = std::move(clone_fuse),
-                                                .potential_score = fuse_score,
-                                                .key = key});
+                            candidates.push_back(GreedyCandidate{.type = GreedyMoveType::kFuse,
+                                                                 .solution = std::move(clone_fuse),
+                                                                 .potential_score = fuse_score,
+                                                                 .key = key});
                         }
                     }
                 }
@@ -447,7 +500,8 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
 
                 Solution retain_candidate =
                     BuildRetainSolution(state, producer_sg_idx, consumer_sg_idx, tensor_idx);
-                if (!NormalizeAndValidateSolution(problem, topo_rank, producer_op, retain_candidate)) {
+                if (!NormalizeAndValidateSolution(problem, topo_rank, producer_op,
+                                                  retain_candidate)) {
                     continue;
                 }
 
@@ -536,8 +590,8 @@ void ExploreGreedyState(const GreedyFuserConfig& config, SearchContext& context,
         }
 
         MaybeUpdateBest(context, evaluation);
-        next_states.push_back(
-            RankedNextState{.total_latency = evaluation.total_latency, .solution = candidate.solution});
+        next_states.push_back(RankedNextState{.total_latency = evaluation.total_latency,
+                                              .solution = candidate.solution});
     }
 
     std::sort(next_states.begin(), next_states.end(),
@@ -578,8 +632,8 @@ auto BuildInitialGreedySolution(const Problem& problem, const TopologyInfo& topo
 }
 
 auto CanIncludeOp(const Problem& problem, const std::vector<int>& producer_op, size_t op_idx,
-                  const std::vector<char>& covered_ops,
-                  const std::vector<char>& selected_ops) -> bool {
+                  const std::vector<char>& covered_ops, const std::vector<char>& selected_ops)
+    -> bool {
     for (size_t input_tensor : problem.ops[op_idx].inputs) {
         int const producer = producer_op[input_tensor];
         if (producer >= 0 && !covered_ops[producer] && !selected_ops[producer]) {
@@ -620,8 +674,7 @@ void EnumerateSubgraphCandidates(const Problem& problem, const std::vector<int>&
     current_subgraph.pop_back();
 }
 
-auto BuildSchedulableSubgraphCandidates(const Problem& problem,
-                                        const std::vector<int>& producer_op,
+auto BuildSchedulableSubgraphCandidates(const Problem& problem, const std::vector<int>& producer_op,
                                         const std::vector<char>& covered_ops,
                                         const std::vector<size_t>& topo_order)
     -> std::vector<std::vector<size_t>> {
