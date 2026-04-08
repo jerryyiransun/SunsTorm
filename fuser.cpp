@@ -1,13 +1,21 @@
 #include "fuser.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <queue>
 #include <set>
+#include <sstream>
+#include <stack>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -22,6 +30,55 @@ namespace mlsys {
 
 namespace {
 
+struct FuserLogState {
+    bool enabled = false;
+    size_t top_k = 0;
+    std::string log_path;
+    std::ofstream stream;
+};
+
+FuserLogState g_fuser_log_state;
+
+auto SanitizeLogToken(const std::string& token) -> std::string {
+    std::string out;
+    out.reserve(token.size());
+    for (char c : token) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_') {
+            out.push_back(c);
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.empty()) {
+        return "unknown";
+    }
+    return out;
+}
+
+auto BuildRunTimestamp() -> std::string {
+    auto const now = std::chrono::system_clock::now();
+    std::time_t const now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_tm{};
+#ifdef _WIN32
+    localtime_s(&local_tm, &now_time);
+#else
+    localtime_r(&now_time, &local_tm);
+#endif
+
+    std::ostringstream out;
+    out << std::put_time(&local_tm, "%Y%m%d_%H%M%S");
+    return out.str();
+}
+
+void WriteFuserLogLine(const std::string& line) {
+    if (!g_fuser_log_state.enabled || !g_fuser_log_state.stream.is_open()) {
+        return;
+    }
+    g_fuser_log_state.stream << line << "\n";
+    g_fuser_log_state.stream.flush();
+}
+
 struct TopologyInfo {
     std::vector<size_t> order;
     std::vector<size_t> rank;
@@ -33,9 +90,22 @@ struct SubgraphTensorUsage {
 };
 
 enum class GreedyMoveType {
-    kFuse,
+    kDirectFuse,
+    kCloneFuse,
     kRetain,
 };
+
+auto MoveTypeName(GreedyMoveType type) -> const char* {
+    switch (type) {
+    case GreedyMoveType::kDirectFuse:
+        return "DirectFuse";
+    case GreedyMoveType::kCloneFuse:
+        return "CloneFuse";
+    case GreedyMoveType::kRetain:
+        return "Retain";
+    }
+    return "Unknown";
+}
 
 struct GreedyCandidate {
     GreedyMoveType type;
@@ -43,6 +113,28 @@ struct GreedyCandidate {
     int64_t potential_score = 0;
     std::string key;
 };
+
+void LogTopKCandidates(const std::vector<GreedyCandidate>& candidates, int depth) {
+    if (!g_fuser_log_state.enabled || g_fuser_log_state.top_k == 0) {
+        return;
+    }
+
+    size_t const limit = std::min(g_fuser_log_state.top_k, candidates.size());
+
+    std::ostringstream header;
+    header << "[TopKCandidates] depth=" << depth << ", total_candidates=" << candidates.size()
+           << ", top_k=" << limit;
+    WriteFuserLogLine(header.str());
+
+    for (size_t idx = 0; idx < limit; ++idx) {
+        const GreedyCandidate& candidate = candidates[idx];
+        std::ostringstream line;
+        line << "rank=" << idx << ", move=" << MoveTypeName(candidate.type)
+             << ", potential_score=" << candidate.potential_score
+             << ", subgraphs=" << candidate.solution.subgraphs.size();
+        WriteFuserLogLine(line.str());
+    }
+}
 
 struct ExactEvaluation {
     bool valid = false;
@@ -57,10 +149,23 @@ struct SearchContext {
     const TopologyInfo& topo;
     GreedyTiler tiler;
     CostModel cost_model;
-    std::unordered_map<std::string, ExactEvaluation> evaluation_cache;
+    std::unordered_map<std::string, std::vector<GreedyCandidate>> scored_candidates_cache;
     bool has_best = false;
     double best_cost = std::numeric_limits<double>::infinity();
     Solution best_solution;
+};
+
+struct SubgraphEdgeDegree {
+    size_t incoming = 0;
+    size_t outgoing = 0;
+};
+
+struct GreedySearchFrame {
+    Solution state;
+    double current_cost = std::numeric_limits<double>::infinity();
+    double base_cost = std::numeric_limits<double>::infinity();
+    int remaining_lookahead = 0;
+    int depth = 0;
 };
 
 auto BuildProducerOpIndex(const Problem& problem) -> std::vector<int> {
@@ -313,10 +418,11 @@ auto BuildCloneFuseSolution(const Solution& solution, size_t producer_sg_idx,
 }
 
 auto BuildRetainSolution(const Solution& solution, size_t producer_sg_idx, size_t consumer_sg_idx,
-                         size_t tensor_idx) -> Solution {
+                         const std::vector<size_t>& tensor_indices) -> Solution {
     Solution retained_solution = solution;
     for (size_t sg_idx = producer_sg_idx; sg_idx < consumer_sg_idx; ++sg_idx) {
-        retained_solution.subgraphs[sg_idx].tensors_to_retain.push_back(tensor_idx);
+        auto& retains = retained_solution.subgraphs[sg_idx].tensors_to_retain;
+        retains.insert(retains.end(), tensor_indices.begin(), tensor_indices.end());
     }
     return retained_solution;
 }
@@ -329,6 +435,79 @@ auto SharedProducerConsumerTensors(const SubgraphTensorUsage& producer_usage,
                           consumer_usage.consumed.begin(), consumer_usage.consumed.end(),
                           std::back_inserter(shared));
     return shared;
+}
+
+auto OpConsumesTensor(const Problem& problem, size_t op_idx, size_t tensor_idx) -> bool {
+    const Op& op = problem.ops[op_idx];
+    return std::find(op.inputs.begin(), op.inputs.end(), tensor_idx) != op.inputs.end();
+}
+
+auto TensorConsumerOpsInSubgraph(const Problem& problem, const Subgraph& subgraph,
+                                 size_t tensor_idx) -> std::vector<size_t> {
+    std::vector<size_t> consumers;
+    for (size_t op_idx : subgraph.ops) {
+        if (OpConsumesTensor(problem, op_idx, tensor_idx)) {
+            consumers.push_back(op_idx);
+        }
+    }
+    return consumers;
+}
+
+auto SubgraphContainsAllOps(const Subgraph& subgraph, const std::vector<size_t>& ops) -> bool {
+    for (size_t op_idx : ops) {
+        if (std::find(subgraph.ops.begin(), subgraph.ops.end(), op_idx) == subgraph.ops.end()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto ComputeNewlyInternalizedBoundaryScore(const Problem& problem,
+                                           const std::vector<int>& producer_op,
+                                           const Solution& parent_state, size_t producer_sg_idx,
+                                           size_t consumer_sg_idx,
+                                           const std::vector<size_t>& shared_tensors,
+                                           const Solution& candidate_state) -> int64_t {
+    int64_t score = 0;
+    const Subgraph& parent_consumer = parent_state.subgraphs[consumer_sg_idx];
+
+    for (size_t tensor_idx : shared_tensors) {
+        int const producer = producer_op[tensor_idx];
+        if (producer < 0) {
+            continue;
+        }
+
+        if (parent_state.subgraphs[producer_sg_idx].ops.end() ==
+            std::find(parent_state.subgraphs[producer_sg_idx].ops.begin(),
+                      parent_state.subgraphs[producer_sg_idx].ops.end(),
+                      static_cast<size_t>(producer))) {
+            continue;
+        }
+
+        std::vector<size_t> consumer_ops =
+            TensorConsumerOpsInSubgraph(problem, parent_consumer, tensor_idx);
+        if (consumer_ops.empty()) {
+            continue;
+        }
+
+        bool internalized = false;
+        for (const auto& candidate_subgraph : candidate_state.subgraphs) {
+            if (!SubgraphContainsAllOps(candidate_subgraph, consumer_ops)) {
+                continue;
+            }
+            if (std::find(candidate_subgraph.ops.begin(), candidate_subgraph.ops.end(),
+                          static_cast<size_t>(producer)) != candidate_subgraph.ops.end()) {
+                internalized = true;
+                break;
+            }
+        }
+
+        if (internalized) {
+            score += TensorSize(problem, tensor_idx);
+        }
+    }
+
+    return score;
 }
 
 auto FindLatestSubgraphContainingOp(const Solution& solution, size_t op_idx, size_t before_idx)
@@ -355,7 +534,7 @@ void PrefuseUnaryUniquePointwise(const Problem& problem, const std::vector<int>&
             const auto& current_subgraph = solution.subgraphs[sg_idx];
             for (size_t pointwise_op_idx : current_subgraph.ops) {
                 const Op& pointwise_op = problem.ops[pointwise_op_idx];
-                if (pointwise_op.op_type != "Pointwise" || pointwise_op.inputs.size() != 1) {
+                if (pointwise_op.inputs.size() != 1) {
                     continue;
                 }
 
@@ -448,9 +627,40 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
                               const std::vector<size_t>& topo_rank, const Solution& state)
     -> std::vector<GreedyCandidate> {
     std::vector<GreedyCandidate> candidates;
-    std::unordered_set<std::string> seen_keys;
+    std::unordered_map<std::string, size_t> candidate_idx_by_key;
     std::string const parent_key = MakeStateKey(state);
     auto usages = BuildSubgraphUsages(problem, state);
+
+    auto AddOrUpdateCandidate = [&](GreedyMoveType type, Solution solution,
+                                    int64_t potential_score) {
+        if (potential_score <= 0) {
+            return;
+        }
+        std::string const key = MakeStateKey(solution);
+        if (key == parent_key) {
+            return;
+        }
+
+        auto existing = candidate_idx_by_key.find(key);
+        if (existing == candidate_idx_by_key.end()) {
+            candidate_idx_by_key[key] = candidates.size();
+            candidates.push_back(GreedyCandidate{
+                .type = type,
+                .solution = std::move(solution),
+                .potential_score = potential_score,
+                .key = key,
+            });
+            return;
+        }
+
+        GreedyCandidate& kept = candidates[existing->second];
+        if (potential_score > kept.potential_score) {
+            kept.type = type;
+            kept.solution = std::move(solution);
+            kept.potential_score = potential_score;
+            kept.key = key;
+        }
+    };
 
     for (size_t producer_sg_idx = 0; producer_sg_idx < state.subgraphs.size(); ++producer_sg_idx) {
         for (size_t consumer_sg_idx = producer_sg_idx + 1; consumer_sg_idx < state.subgraphs.size();
@@ -461,59 +671,56 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
                 continue;
             }
 
-            int64_t fuse_score = 0;
-            for (size_t tensor_idx : shared_tensors) {
-                fuse_score += TensorSize(problem, tensor_idx);
+            bool consumer_is_producer = false;
+            // for (size_t downstream_sg_idx = consumer_sg_idx + 1;
+            //      downstream_sg_idx < state.subgraphs.size(); ++downstream_sg_idx) {
+            //     if (!SharedProducerConsumerTensors(usages[consumer_sg_idx],
+            //                                        usages[downstream_sg_idx])
+            //              .empty()) {
+            //         consumer_is_producer = true;
+            //         break;
+            //     }
+            // }
+            int64_t const potential_saving_multiplier = consumer_is_producer ? 2 : 1;
+
+            Solution direct_merge =
+                BuildDirectMergeSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
+            if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, direct_merge)) {
+                int64_t const direct_score = potential_saving_multiplier *
+                                             ComputeNewlyInternalizedBoundaryScore(
+                                                 problem, producer_op, state, producer_sg_idx,
+                                                 consumer_sg_idx, shared_tensors, direct_merge);
+                AddOrUpdateCandidate(GreedyMoveType::kDirectFuse, std::move(direct_merge),
+                                     direct_score);
             }
 
-            if (fuse_score > 0) {
-                Solution direct_merge =
-                    BuildDirectMergeSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
-                if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, direct_merge)) {
-                    std::string const key = MakeStateKey(direct_merge);
-                    if (key != parent_key && seen_keys.insert(key).second) {
-                        candidates.push_back(GreedyCandidate{.type = GreedyMoveType::kFuse,
-                                                             .solution = std::move(direct_merge),
-                                                             .potential_score = fuse_score,
-                                                             .key = key});
-                    }
-                } else {
-                    Solution clone_fuse =
-                        BuildCloneFuseSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
-                    if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, clone_fuse)) {
-                        std::string const key = MakeStateKey(clone_fuse);
-                        if (key != parent_key && seen_keys.insert(key).second) {
-                            candidates.push_back(GreedyCandidate{.type = GreedyMoveType::kFuse,
-                                                                 .solution = std::move(clone_fuse),
-                                                                 .potential_score = fuse_score,
-                                                                 .key = key});
-                        }
-                    }
-                }
+            Solution clone_fuse =
+                BuildCloneFuseSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
+            if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, clone_fuse)) {
+                int64_t const clone_score =
+                    potential_saving_multiplier * ComputeNewlyInternalizedBoundaryScore(
+                                                      problem, producer_op, state, producer_sg_idx,
+                                                      consumer_sg_idx, shared_tensors, clone_fuse);
+                AddOrUpdateCandidate(GreedyMoveType::kCloneFuse, std::move(clone_fuse),
+                                     clone_score);
             }
-
+            int64_t retain_score = 0;
             for (size_t tensor_idx : shared_tensors) {
-                int64_t const retain_score = TensorSize(problem, tensor_idx);
-                if (retain_score <= 0) {
+                int64_t const tensor_score = TensorSize(problem, tensor_idx);
+                if (tensor_score <= 0) {
                     continue;
                 }
+                retain_score += tensor_score;
+            }
 
+            if (retain_score > 0) {
                 Solution retain_candidate =
-                    BuildRetainSolution(state, producer_sg_idx, consumer_sg_idx, tensor_idx);
-                if (!NormalizeAndValidateSolution(problem, topo_rank, producer_op,
-                                                  retain_candidate)) {
-                    continue;
+                    BuildRetainSolution(state, producer_sg_idx, consumer_sg_idx, shared_tensors);
+                if (NormalizeAndValidateSolution(problem, topo_rank, producer_op,
+                                                 retain_candidate)) {
+                    AddOrUpdateCandidate(GreedyMoveType::kRetain, std::move(retain_candidate),
+                                         potential_saving_multiplier * retain_score);
                 }
-
-                std::string const key = MakeStateKey(retain_candidate);
-                if (key == parent_key || !seen_keys.insert(key).second) {
-                    continue;
-                }
-
-                candidates.push_back(GreedyCandidate{.type = GreedyMoveType::kRetain,
-                                                     .solution = std::move(retain_candidate),
-                                                     .potential_score = retain_score,
-                                                     .key = key});
             }
         }
     }
@@ -528,26 +735,151 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
     return candidates;
 }
 
-auto EvaluateCandidateState(SearchContext& context, const GreedyCandidate& candidate)
-    -> const ExactEvaluation& {
-    auto cache_it = context.evaluation_cache.find(candidate.key);
-    if (cache_it != context.evaluation_cache.end()) {
-        return cache_it->second;
-    }
+auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<int>& producer_op,
+                                     const std::vector<size_t>& topo_rank, const Solution& state)
+    -> std::vector<GreedyCandidate> {
+    std::vector<GreedyCandidate> candidates;
+    std::unordered_map<std::string, size_t> candidate_idx_by_key;
+    std::string const parent_key = MakeStateKey(state);
+    auto usages = BuildSubgraphUsages(problem, state);
 
-    ExactEvaluation evaluation;
-    auto tiled = context.tiler.tile(context.problem, candidate.solution);
-    if (tiled.ok()) {
-        auto estimated = context.cost_model.estimate(tiled.value());
-        if (estimated.ok()) {
-            evaluation.valid = true;
-            evaluation.solution = std::get<0>(estimated.value());
-            evaluation.total_latency = std::get<1>(estimated.value());
+    auto AddOrUpdateCandidate = [&](GreedyMoveType type, Solution solution,
+                                    int64_t potential_score) {
+        if (potential_score <= 0) {
+            return;
+        }
+        std::string const key = MakeStateKey(solution);
+        if (key == parent_key) {
+            return;
+        }
+
+        auto existing = candidate_idx_by_key.find(key);
+        if (existing == candidate_idx_by_key.end()) {
+            candidate_idx_by_key[key] = candidates.size();
+            candidates.push_back(GreedyCandidate{
+                .type = type,
+                .solution = std::move(solution),
+                .potential_score = potential_score,
+                .key = key,
+            });
+            return;
+        }
+
+        GreedyCandidate& kept = candidates[existing->second];
+        if (potential_score > kept.potential_score) {
+            kept.type = type;
+            kept.solution = std::move(solution);
+            kept.potential_score = potential_score;
+            kept.key = key;
+        }
+    };
+
+    auto AverageScoreByTensorCount = [](int64_t raw_score, size_t tensor_count) -> int64_t {
+        if (raw_score <= 0 || tensor_count == 0) {
+            return 0;
+        }
+        return raw_score / static_cast<int64_t>(tensor_count);
+    };
+
+    for (size_t producer_sg_idx = 0; producer_sg_idx < state.subgraphs.size(); ++producer_sg_idx) {
+        for (size_t consumer_sg_idx = producer_sg_idx + 1; consumer_sg_idx < state.subgraphs.size();
+             ++consumer_sg_idx) {
+            std::vector<size_t> const shared_tensors =
+                SharedProducerConsumerTensors(usages[producer_sg_idx], usages[consumer_sg_idx]);
+            if (shared_tensors.empty()) {
+                continue;
+            }
+
+            size_t const shared_tensor_count = shared_tensors.size();
+
+            bool consumer_is_producer = false;
+            for (size_t downstream_sg_idx = consumer_sg_idx + 1;
+                 downstream_sg_idx < state.subgraphs.size(); ++downstream_sg_idx) {
+                if (!SharedProducerConsumerTensors(usages[consumer_sg_idx],
+                                                   usages[downstream_sg_idx])
+                         .empty()) {
+                    consumer_is_producer = true;
+                    break;
+                }
+            }
+            int64_t const potential_saving_multiplier = consumer_is_producer ? 2 : 1;
+
+            Solution direct_merge =
+                BuildDirectMergeSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
+            if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, direct_merge)) {
+                int64_t const direct_raw_score = potential_saving_multiplier *
+                                                 ComputeNewlyInternalizedBoundaryScore(
+                                                     problem, producer_op, state, producer_sg_idx,
+                                                     consumer_sg_idx, shared_tensors, direct_merge);
+                int64_t const direct_score =
+                    AverageScoreByTensorCount(direct_raw_score, shared_tensor_count);
+                AddOrUpdateCandidate(GreedyMoveType::kDirectFuse, std::move(direct_merge),
+                                     direct_score);
+            }
+
+            Solution clone_fuse =
+                BuildCloneFuseSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
+            if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, clone_fuse)) {
+                int64_t const clone_raw_score =
+                    potential_saving_multiplier * ComputeNewlyInternalizedBoundaryScore(
+                                                      problem, producer_op, state, producer_sg_idx,
+                                                      consumer_sg_idx, shared_tensors, clone_fuse);
+                int64_t const clone_score =
+                    AverageScoreByTensorCount(clone_raw_score, shared_tensor_count);
+                AddOrUpdateCandidate(GreedyMoveType::kCloneFuse, std::move(clone_fuse),
+                                     clone_score);
+            }
+
+            int64_t retain_total = 0;
+            for (size_t tensor_idx : shared_tensors) {
+                int64_t const tensor_score = TensorSize(problem, tensor_idx);
+                if (tensor_score <= 0) {
+                    continue;
+                }
+                retain_total += tensor_score;
+            }
+
+            if (retain_total > 0) {
+                Solution retain_candidate =
+                    BuildRetainSolution(state, producer_sg_idx, consumer_sg_idx, shared_tensors);
+                if (NormalizeAndValidateSolution(problem, topo_rank, producer_op,
+                                                 retain_candidate)) {
+                    int64_t const retain_raw_score = potential_saving_multiplier * retain_total;
+                    int64_t const retain_score =
+                        AverageScoreByTensorCount(retain_raw_score, shared_tensor_count);
+                    AddOrUpdateCandidate(GreedyMoveType::kRetain, std::move(retain_candidate),
+                                         retain_score);
+                }
+            }
         }
     }
 
-    auto [it, _] = context.evaluation_cache.emplace(candidate.key, std::move(evaluation));
-    return it->second;
+    std::sort(candidates.begin(), candidates.end(),
+              [](const GreedyCandidate& lhs, const GreedyCandidate& rhs) {
+                  if (lhs.potential_score != rhs.potential_score) {
+                      return lhs.potential_score > rhs.potential_score;
+                  }
+                  return lhs.key < rhs.key;
+              });
+    return candidates;
+}
+auto EvaluateCandidateState(SearchContext& context, const GreedyCandidate& candidate)
+    -> ExactEvaluation {
+    ExactEvaluation evaluation;
+    auto tiled = context.tiler.tile(context.problem, candidate.solution);
+    if (!tiled.ok()) {
+        return evaluation;
+    }
+
+    auto estimated = context.cost_model.estimate(tiled.value());
+    if (!estimated.ok()) {
+        return evaluation;
+    }
+
+    evaluation.valid = true;
+    evaluation.solution = std::get<0>(estimated.value());
+    evaluation.total_latency = std::get<1>(estimated.value());
+    return evaluation;
 }
 
 void MaybeUpdateBest(SearchContext& context, const ExactEvaluation& evaluation) {
@@ -561,52 +893,227 @@ void MaybeUpdateBest(SearchContext& context, const ExactEvaluation& evaluation) 
     }
 }
 
-void ExploreGreedyState(const GreedyFuserConfig& config, SearchContext& context,
-                        const Solution& state, int depth) {
-    if (depth >= config.search_depth) {
-        return;
+auto BuildSubgraphEdgeDegrees(const Problem& problem, const Solution& state)
+    -> std::vector<SubgraphEdgeDegree> {
+    auto usages = BuildSubgraphUsages(problem, state);
+    std::vector<SubgraphEdgeDegree> degrees(state.subgraphs.size());
+
+    for (size_t producer_sg_idx = 0; producer_sg_idx < state.subgraphs.size(); ++producer_sg_idx) {
+        for (size_t consumer_sg_idx = producer_sg_idx + 1; consumer_sg_idx < state.subgraphs.size();
+             ++consumer_sg_idx) {
+            std::vector<size_t> const shared_tensors =
+                SharedProducerConsumerTensors(usages[producer_sg_idx], usages[consumer_sg_idx]);
+            if (shared_tensors.empty()) {
+                continue;
+            }
+
+            degrees[producer_sg_idx].outgoing += shared_tensors.size();
+            degrees[consumer_sg_idx].incoming += shared_tensors.size();
+        }
     }
 
-    auto candidates =
-        GenerateGreedyCandidates(context.problem, context.producer_op, context.topo.rank, state);
+    return degrees;
+}
 
-    struct RankedNextState {
-        double total_latency;
-        Solution solution;
-    };
+void PrefuseLinearUniqueChains(const Problem& problem, const std::vector<int>& producer_op,
+                               const std::vector<size_t>& topo_rank, Solution& solution) {
+    while (true) {
+        bool changed = false;
+        auto usages = BuildSubgraphUsages(problem, solution);
+        auto edge_degrees = BuildSubgraphEdgeDegrees(problem, solution);
 
-    size_t exact_evaluated = 0;
-    std::vector<RankedNextState> next_states;
+        for (size_t producer_sg_idx = 0; producer_sg_idx < solution.subgraphs.size();
+             ++producer_sg_idx) {
+            if (edge_degrees[producer_sg_idx].outgoing != 1) {
+                continue;
+            }
 
-    for (const auto& candidate : candidates) {
-        if (exact_evaluated >= static_cast<size_t>(config.beam_width)) {
-            break;
+            for (size_t consumer_sg_idx = producer_sg_idx + 1;
+                 consumer_sg_idx < solution.subgraphs.size(); ++consumer_sg_idx) {
+                std::vector<size_t> const shared_tensors =
+                    SharedProducerConsumerTensors(usages[producer_sg_idx], usages[consumer_sg_idx]);
+                if (shared_tensors.size() != 1) {
+                    continue;
+                }
+
+                if (edge_degrees[consumer_sg_idx].incoming != 1 ||
+                    edge_degrees[consumer_sg_idx].outgoing != 1) {
+                    continue;
+                }
+
+                Solution merged =
+                    BuildDirectMergeSolution(solution, producer_sg_idx, consumer_sg_idx, topo_rank);
+                if (!NormalizeAndValidateSolution(problem, topo_rank, producer_op, merged)) {
+                    continue;
+                }
+
+                solution = std::move(merged);
+                changed = true;
+                break;
+            }
+
+            if (changed) {
+                break;
+            }
         }
 
-        const ExactEvaluation& evaluation = EvaluateCandidateState(context, candidate);
-        ++exact_evaluated;
-        if (!evaluation.valid) {
-            continue;
+        if (!changed) {
+            return;
         }
-
-        MaybeUpdateBest(context, evaluation);
-        next_states.push_back(RankedNextState{.total_latency = evaluation.total_latency,
-                                              .solution = candidate.solution});
-    }
-
-    std::sort(next_states.begin(), next_states.end(),
-              [](const RankedNextState& lhs, const RankedNextState& rhs) {
-                  if (lhs.total_latency != rhs.total_latency) {
-                      return lhs.total_latency < rhs.total_latency;
-                  }
-                  return MakeStateKey(lhs.solution) < MakeStateKey(rhs.solution);
-              });
-
-    for (const auto& next_state : next_states) {
-        ExploreGreedyState(config, context, next_state.solution, depth + 1);
     }
 }
 
+void PrefuseFreeUnaryChains(const Problem& problem, const std::vector<int>& producer_op,
+                            const std::vector<std::vector<size_t>>& consumers_by_tensor,
+                            const std::vector<size_t>& topo_rank, Solution& solution) {
+    auto subgraph_all_unary = [&](const Subgraph& subgraph) -> bool {
+        for (size_t op_idx : subgraph.ops) {
+            if (problem.ops[op_idx].inputs.size() != 1) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    while (true) {
+        bool changed = false;
+        auto usages = BuildSubgraphUsages(problem, solution);
+
+        for (size_t producer_sg_idx = 0; producer_sg_idx < solution.subgraphs.size();
+             ++producer_sg_idx) {
+            if (!subgraph_all_unary(solution.subgraphs[producer_sg_idx])) {
+                continue;
+            }
+
+            for (size_t consumer_sg_idx = producer_sg_idx + 1;
+                 consumer_sg_idx < solution.subgraphs.size(); ++consumer_sg_idx) {
+                if (!subgraph_all_unary(solution.subgraphs[consumer_sg_idx])) {
+                    continue;
+                }
+
+                std::vector<size_t> const shared_tensors =
+                    SharedProducerConsumerTensors(usages[producer_sg_idx], usages[consumer_sg_idx]);
+                if (shared_tensors.size() != 1) {
+                    continue;
+                }
+
+                size_t const boundary_tensor = shared_tensors[0];
+                if (consumers_by_tensor[boundary_tensor].size() != 1) {
+                    continue;
+                }
+
+                Solution merged =
+                    BuildDirectMergeSolution(solution, producer_sg_idx, consumer_sg_idx, topo_rank);
+                if (!NormalizeAndValidateSolution(problem, topo_rank, producer_op, merged)) {
+                    continue;
+                }
+
+                solution = std::move(merged);
+                changed = true;
+                break;
+            }
+
+            if (changed) {
+                break;
+            }
+        }
+
+        if (!changed) {
+            return;
+        }
+    }
+}
+
+auto TopScoringFusions(SearchContext& context, const Solution& state)
+    -> const std::vector<GreedyCandidate>& {
+    std::string const state_key = MakeStateKey(state);
+    auto cache_it = context.scored_candidates_cache.find(state_key);
+    if (cache_it != context.scored_candidates_cache.end()) {
+        return cache_it->second;
+    }
+
+    std::vector<GreedyCandidate> generated = GenerateGreedyCandidatesAverage(
+        context.problem, context.producer_op, context.topo.rank, state);
+    auto [inserted_it, _] =
+        context.scored_candidates_cache.emplace(state_key, std::move(generated));
+    return inserted_it->second;
+}
+
+void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& context,
+                              const Solution& initial_state, double initial_cost) {
+    std::stack<GreedySearchFrame> fusion_stack;
+    fusion_stack.push(GreedySearchFrame{
+        .state = initial_state,
+        .current_cost = initial_cost,
+        .base_cost = initial_cost,
+        .remaining_lookahead = 0,
+        .depth = 0,
+    });
+
+    while (!fusion_stack.empty()) {
+        GreedySearchFrame frame = std::move(fusion_stack.top());
+        fusion_stack.pop();
+
+        if (frame.depth >= config.search_depth) {
+            continue;
+        }
+
+        const std::vector<GreedyCandidate>& candidates = TopScoringFusions(context, frame.state);
+        LogTopKCandidates(candidates, frame.depth);
+        std::vector<GreedySearchFrame> next_frames;
+        next_frames.reserve(candidates.size());
+        size_t valid_evaluated = 0;
+
+        for (const auto& candidate : candidates) {
+            if (valid_evaluated >= static_cast<size_t>(config.beam_width)) {
+                break;
+            }
+            ExactEvaluation evaluation = EvaluateCandidateState(context, candidate);
+            if (!evaluation.valid) {
+                continue;
+            }
+            ++valid_evaluated;
+            MaybeUpdateBest(context, evaluation);
+
+            GreedySearchFrame next_frame{
+                .state = candidate.solution,
+                .current_cost = evaluation.total_latency,
+                .base_cost = frame.base_cost,
+                .remaining_lookahead = frame.remaining_lookahead,
+                .depth = frame.depth + 1,
+            };
+
+            if (frame.remaining_lookahead == 0) {
+                if (next_frame.current_cost < frame.current_cost) {
+                    next_frame.base_cost = next_frame.current_cost;
+                    next_frame.remaining_lookahead = 0;
+                } else {
+                    next_frame.base_cost = frame.current_cost;
+                    next_frame.remaining_lookahead = 2;
+                }
+                next_frames.push_back(std::move(next_frame));
+                continue;
+            }
+
+            if (next_frame.current_cost < frame.base_cost) {
+                next_frame.base_cost = next_frame.current_cost;
+                next_frame.remaining_lookahead = 0;
+                next_frames.push_back(std::move(next_frame));
+                continue;
+            }
+
+            if (frame.remaining_lookahead > 1) {
+                next_frame.base_cost = frame.base_cost;
+                next_frame.remaining_lookahead = frame.remaining_lookahead - 1;
+                next_frames.push_back(std::move(next_frame));
+            }
+        }
+
+        for (auto next_it = next_frames.rbegin(); next_it != next_frames.rend(); ++next_it) {
+            fusion_stack.push(std::move(*next_it));
+        }
+    }
+}
 auto BuildInitialGreedySolution(const Problem& problem, const TopologyInfo& topo,
                                 const std::vector<int>& producer_op,
                                 const std::vector<std::vector<size_t>>& consumers_by_tensor)
@@ -621,8 +1128,7 @@ auto BuildInitialGreedySolution(const Problem& problem, const TopologyInfo& topo
         initial_solution.subgraphs.push_back(subgraph);
     }
 
-    PrefuseUnaryUniquePointwise(problem, producer_op, consumers_by_tensor, topo.rank,
-                                initial_solution);
+    PrefuseFreeUnaryChains(problem, producer_op, consumers_by_tensor, topo.rank, initial_solution);
 
     if (!NormalizeAndValidateSolution(problem, topo.rank, producer_op, initial_solution)) {
         return absl::FailedPreconditionError("Failed to build a valid initial greedy solution");
@@ -719,6 +1225,54 @@ void EnumerateSchedules(const Problem& problem, const std::vector<int>& producer
 
 } // namespace
 
+void ConfigureFuserLogging(const FuserLoggingConfig& config) {
+    if (g_fuser_log_state.stream.is_open()) {
+        g_fuser_log_state.stream.close();
+    }
+
+    g_fuser_log_state.enabled = false;
+    g_fuser_log_state.top_k = 0;
+    g_fuser_log_state.log_path.clear();
+
+    if (config.enable_topk_candidate_logging == false || config.top_k <= 0) {
+        return;
+    }
+
+    std::filesystem::path const log_dir = config.log_directory.empty()
+                                              ? std::filesystem::path("logs")
+                                              : std::filesystem::path(config.log_directory);
+
+    std::error_code ec;
+    std::filesystem::create_directories(log_dir, ec);
+    if (ec) {
+        return;
+    }
+
+    std::string const benchmark = SanitizeLogToken(config.benchmark_name);
+    std::string const solver = SanitizeLogToken(config.solver_name);
+    std::string const timestamp = BuildRunTimestamp();
+    std::filesystem::path const log_path =
+        log_dir / (timestamp + "_" + benchmark + "_" + solver + "_fuser_topk.log");
+
+    g_fuser_log_state.stream.open(log_path, std::ios::out | std::ios::trunc);
+    if (g_fuser_log_state.stream.is_open() == false) {
+        return;
+    }
+
+    g_fuser_log_state.enabled = true;
+    g_fuser_log_state.top_k = static_cast<size_t>(config.top_k);
+    g_fuser_log_state.log_path = log_path.string();
+
+    std::ostringstream header;
+    header << "[FuserLogStart] benchmark=" << benchmark << ", solver=" << solver
+           << ", top_k=" << g_fuser_log_state.top_k;
+    WriteFuserLogLine(header.str());
+}
+
+auto GetFuserLogPath() -> std::string {
+    return g_fuser_log_state.log_path;
+}
+
 GreedyFuser::GreedyFuser(GreedyFuserConfig config) : config_(config) {}
 
 auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
@@ -757,7 +1311,7 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
     };
 
     GreedyCandidate root_candidate{
-        .type = GreedyMoveType::kFuse,
+        .type = GreedyMoveType::kDirectFuse,
         .solution = initial_solution,
         .potential_score = 0,
         .key = MakeStateKey(initial_solution),
@@ -765,7 +1319,9 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
     const ExactEvaluation& root_evaluation = EvaluateCandidateState(context, root_candidate);
     MaybeUpdateBest(context, root_evaluation);
 
-    ExploreGreedyState(config_, context, initial_solution, 0);
+    double const initial_cost = root_evaluation.valid ? root_evaluation.total_latency
+                                                      : std::numeric_limits<double>::infinity();
+    RunGreedyLookaheadSearch(config_, context, initial_solution, initial_cost);
 
     if (!context.has_best) {
         return absl::InternalError("Greedy fuser found no valid plans");

@@ -169,8 +169,8 @@ auto HeuristicSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> 
     }
     singleton_solution = get<0>(singleton_estimated.value());
 
-    std::vector<std::vector<IntervalPlan>> interval_plans(
-        num_ops, std::vector<IntervalPlan>(num_ops));
+    std::vector<std::vector<IntervalPlan>> interval_plans(num_ops,
+                                                          std::vector<IntervalPlan>(num_ops));
     BruteForceTiler tiler;
 
     for (size_t start = 0; start < num_ops; ++start) {
@@ -264,24 +264,7 @@ auto GreedySolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
         use_problem_sized_config_ ? GreedyConfigForProblem(problem.ops.size()) : config_;
 
     GreedyFuser fuser(effective_config);
-    auto fused_solution = fuser.fuse(problem);
-    if (!fused_solution.ok()) {
-        return fused_solution.status();
-    }
-
-    GreedyTiler tiler;
-    auto tiled_solution = tiler.tile(problem, fused_solution.value());
-    if (!tiled_solution.ok()) {
-        return tiled_solution.status();
-    }
-
-    CostModel cost_model(problem);
-    auto estimated = cost_model.estimate(tiled_solution.value());
-    if (!estimated.ok()) {
-        return estimated.status();
-    }
-
-    return get<0>(estimated.value());
+    return fuser.fuse(problem);
 }
 
 } // namespace mlsys

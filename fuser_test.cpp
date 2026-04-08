@@ -400,4 +400,79 @@ TEST(FuserTest, UsesExplicitTopologicalOrderForGeneratedSolution) {
     ExpectGreedySolutionValid(problem, *solution);
 }
 
+TEST(FuserTest, BeamWidthOneStillFindsRecomputationSchedule) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 256, .height = 256},
+        {.width = 256, .height = 256},
+        {.width = 256, .height = 256},
+        {.width = 256, .height = 256},
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {3}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 35'000;
+    problem.slow_memory_bandwidth = 1;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::GreedyFuser fuser(MakeGreedyConfig(2, 1));
+    auto solution = fuser.fuse(problem);
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
+
+    bool found_left_branch = false;
+    bool found_right_branch = false;
+    for (const auto& subgraph : solution->subgraphs) {
+        if (subgraph.ops == std::vector<size_t>({0, 1})) {
+            found_left_branch = true;
+        }
+        if (subgraph.ops == std::vector<size_t>({0, 2})) {
+            found_right_branch = true;
+        }
+    }
+
+    EXPECT_TRUE(found_left_branch) << FormatSolution(*solution);
+    EXPECT_TRUE(found_right_branch) << FormatSolution(*solution);
+    ExpectGreedySolutionValid(problem, *solution);
+}
+
+TEST(FuserTest, BeamWidthOnePrioritizesHigherScoredFuseCandidate) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 256, .height = 256}, // 0
+        {.width = 256, .height = 256}, // 1
+        {.width = 256, .height = 256}, // 2
+        {.width = 64, .height = 64},   // 3
+        {.width = 64, .height = 64},   // 4
+        {.width = 64, .height = 64},   // 5
+        {.width = 256, .height = 256}, // 6
+        {.width = 64, .height = 64},   // 7
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1, 6}, .outputs = {2}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {3}, .outputs = {4}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {4, 7}, .outputs = {5}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::GreedyFuser fuser(MakeGreedyConfig(1, 1));
+    auto solution = fuser.fuse(problem);
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
+    ExpectGreedySolutionValid(problem, *solution);
+
+    bool fused_large_pair = false;
+    for (const auto& subgraph : solution->subgraphs) {
+        if (subgraph.ops == std::vector<size_t>({0, 1})) {
+            fused_large_pair = true;
+            break;
+        }
+    }
+
+    EXPECT_TRUE(fused_large_pair) << FormatSolution(*solution);
+}
+
 } // namespace
