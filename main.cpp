@@ -1,7 +1,8 @@
 #include "mlsys.h"
-#include "nlohmann/json.hpp"
 #include "solver.h"
+
 #include <iostream>
+#include <memory>
 #include <string>
 
 using namespace mlsys;
@@ -19,29 +20,21 @@ auto main(int argc, char* argv[]) -> int {
     std::cout << "Input file: " << input_path << "\n";
     std::cout << "Output file: " << output_path << "\n";
 
-    // Read the problem
     auto problem_status = ReadProblem(input_path);
-    if (!problem_status.ok()) {
+    if (problem_status.ok() == false) {
         std::cerr << "Error reading input: " << problem_status.status().message() << "\n";
         return 1;
     }
     Problem problem = problem_status.value();
 
-#ifdef DEBUG
-    std::cout << "***DEBUG*** " << problem.tensors.size() << " tensors and " << problem.ops.size()
-              << " operations loaded.\n";
-#endif
-
-    // Scheduling logic
     std::unique_ptr<Solver> solver = std::make_unique<GreedySolver>();
     auto solution_status = solver->solve(problem);
-    if (!solution_status.ok()) {
+    if (solution_status.ok() == false) {
         std::cerr << "Error solving problem: " << solution_status.status().message() << "\n";
         return 1;
     }
     const Solution& solution = solution_status.value();
 
-    // #ifdef DEBUG
     auto eval_status = Evaluate(problem, solution);
     if (eval_status.ok()) {
         std::cout << "Evaluation successful.\n";
@@ -49,11 +42,9 @@ auto main(int argc, char* argv[]) -> int {
     } else {
         std::cerr << "Error evaluating solution: " << eval_status.status().message() << "\n";
     }
-    // #endif
 
-    // Write the output
     auto write_status = WriteSolution(solution, output_path);
-    if (!write_status.ok()) {
+    if (write_status.ok() == false) {
         std::cerr << "Error writing output: " << write_status.message() << "\n";
         return 1;
     }

@@ -18,8 +18,8 @@ Open your terminal at the project root and run:
 cmake -B build
 cmake --build build
 
-# Debug build
-cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug
+# Debug build (with fuser logging enabled)
+cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug -DMLSYS_ENABLE_FUSER_LOGGING=ON
 cmake --build build-debug
 
 # Profiling build
@@ -29,8 +29,10 @@ cmake --build build-relwithdebinfo
 
 ## How to Run
 
+`mlsys` follows the competition interface and accepts exactly two arguments:
+
 ```bash
-./build/mlsys path/to/input.json path/to/output.json
+./build/mlsys <path/to/input.json> <path/to/output.json>
 
 # example
 ./build/mlsys benchmarks/mlsys-2026-1.json out.json
@@ -41,10 +43,71 @@ enabled while preserving debug symbols, which makes profiler output much more
 readable without making the binary behave like a debug build.
 
 ```bash
-./build-relwithdebinfo/mlsys path/to/input.json path/to/output.json
+./build-relwithdebinfo/mlsys <path/to/input.json> <path/to/output.json>
 
 # example
 ./build-relwithdebinfo/mlsys benchmarks/mlsys-2026-1.json out.json
+```
+
+## Local Runner (`run_solver`)
+
+Use `run_solver` for local experimentation when you want to choose a solver
+from the command line.
+
+```bash
+./build-relwithdebinfo/run_solver <solver> <input.json> <output.json>
+
+# solver options
+# greedy | base | heuristic | brute_force
+```
+
+## Fuser Top-K Candidate Logging
+
+`--fuser-log-top-k=<int>` enables greedy-fuser candidate logging and records the
+highest-scoring K candidates at each search depth.
+
+This logger is compile-time gated by `MLSYS_ENABLE_FUSER_LOGGING` and is **OFF
+by default** (submission-safe, no logger overhead in `mlsys`).
+
+Enable it for local analysis builds:
+
+```bash
+cmake -S . -B build-relwithdebinfo -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMLSYS_ENABLE_FUSER_LOGGING=ON
+cmake --build build-relwithdebinfo -j
+```
+
+- If logging is compiled out, `run_solver --fuser-log-top-k=...` prints a warning and ignores it.
+- If `K=0`, runtime logging is disabled.
+- If `K>0`, each ranked candidate logs:
+  - move type and score
+  - producer/consumer subgraph pair and touched tensors
+  - `pair_subgraph_ops=[producer_ops,consumer_ops]`
+  - `candidate_solution_subgraphs_ops=[[ops...],[ops...],...]`
+- This applies to `GreedySolver` runs; for other solvers, the flag is ignored.
+
+Example:
+
+```bash
+./build-relwithdebinfo/run_solver greedy examples/example-3-input.json out.json \
+  --fuser-log-top-k=5 \
+  --fuser-log-dir=logs
+```
+
+Additional logging flag:
+
+- `--fuser-log-dir=<dir>`: output directory for log files
+
+Log filename format:
+
+- `<timestamp>_<benchmark>_<solver>_fuser_topk.log`
+- `benchmark` is derived from the input filename stem (for example `example-3-input`)
+
+Example log inspection:
+
+```bash
+ls -1 logs/*_fuser_topk.log
+
+tail -n 100 logs/*_fuser_topk.log
 ```
 
 ## Profiling with `perf`

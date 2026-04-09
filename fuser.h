@@ -10,6 +10,7 @@ namespace mlsys {
 struct GreedyFuserConfig {
     int search_depth;
     int beam_width;
+    double topk_failure_penalty;
 };
 
 class BruteForceFuser {

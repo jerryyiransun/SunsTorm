@@ -12,6 +12,7 @@ auto MakeGreedyConfig(int search_depth, int beam_width) -> mlsys::GreedyFuserCon
     return mlsys::GreedyFuserConfig{
         .search_depth = search_depth,
         .beam_width = beam_width,
+        .topk_failure_penalty = 0.8,
     };
 }
 
