@@ -1074,14 +1074,14 @@ auto RankCandidatesByOpHitPenalty(const std::vector<GreedyCandidate>& candidates
                                   const std::unordered_map<size_t, double>& topk_hits_by_op,
                                   double topk_failure_penalty)
     -> std::vector<RankedGreedyCandidate> {
-    (void)topk_hits_by_op;
-    (void)topk_failure_penalty;
     std::vector<RankedGreedyCandidate> ranked_candidates;
     ranked_candidates.reserve(candidates.size());
     for (const GreedyCandidate& candidate : candidates) {
-        // Temporarily disable hit-rate penalty; rank by raw potential score.
-        double const op_hit_sum = 0.0;
-        double const penalized_score = static_cast<double>(candidate.potential_score);
+        double const op_hit_sum = ComputeCandidateOpHitSum(candidate, topk_hits_by_op);
+        // Linear penalty: score / (1 + a * hit_sum), where a = topk_failure_penalty.
+        double const denom = 1.0 + (topk_failure_penalty * op_hit_sum);
+        double const penalized_score =
+            static_cast<double>(candidate.potential_score) / std::max(denom, 1.0);
         ranked_candidates.push_back(RankedGreedyCandidate{
             .candidate = &candidate, .penalized_score = penalized_score, .op_hit_sum = op_hit_sum});
     }
@@ -1196,7 +1196,28 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
             }
         }
 
-        (void)evaluated_candidates;
+        for (const EvaluatedCandidateResult& evaluated_candidate : evaluated_candidates) {
+            if (evaluated_candidate.improved || evaluated_candidate.candidate == nullptr) {
+                continue;
+            }
+            auto add_subgraph_hit_mass = [&](const std::vector<size_t>& subgraph_ops) {
+                if (subgraph_ops.empty()) {
+                    return;
+                }
+                double const per_op_ratio = 1.0 / static_cast<double>(subgraph_ops.size());
+                for (size_t op_idx : subgraph_ops) {
+                    double& op_hit = context.topk_hits_by_op[op_idx];
+                    if (op_hit <= 0.0) {
+                        // Bootstrap first touch so multiplicative updates are not stuck at zero.
+                        op_hit = per_op_ratio;
+                    } else {
+                        op_hit += op_hit * per_op_ratio;
+                    }
+                }
+            };
+            add_subgraph_hit_mass(evaluated_candidate.candidate->producer_subgraph_ops);
+            add_subgraph_hit_mass(evaluated_candidate.candidate->consumer_subgraph_ops);
+        }
 
         for (auto next_it = next_frames.rbegin(); next_it != next_frames.rend(); ++next_it) {
             fusion_stack.push(std::move(*next_it));
