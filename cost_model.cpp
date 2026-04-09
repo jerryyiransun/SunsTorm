@@ -5,8 +5,8 @@
 #include <cstdint>
 #include <iostream>
 #include <map>
-#include <sstream>
 #include <set>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -19,7 +19,7 @@ namespace mlsys {
 
 namespace {
 
-// Group tiles by tensor id so we can compute union areas tensor-by-tensor.
+// Group tiles by tensor id.
 using TilesByTensor = std::unordered_map<size_t, std::vector<Tile>>;
 
 struct SubgraphMeta {
@@ -74,8 +74,7 @@ auto CeilDiv(int64_t a, int64_t b) -> int64_t {
 }
 
 #ifdef DEBUG
-template <typename T>
-auto FormatVector(const std::vector<T>& values) -> std::string {
+template <typename T> auto FormatVector(const std::vector<T>& values) -> std::string {
     std::ostringstream oss;
     oss << "[";
     for (size_t idx = 0; idx < values.size(); ++idx) {
@@ -131,6 +130,14 @@ auto ClipTileToTensor(const Problem& problem, Tile tile) -> Tile {
     return tile;
 }
 
+auto IsFullTensorTile(const Problem& problem, const Tile& tile) -> bool {
+    if (tile.tensor_idx >= problem.tensors.size()) {
+        return false;
+    }
+    const Tensor& tensor = problem.tensors[tile.tensor_idx];
+    return tile.x0 == 0 && tile.y0 == 0 && tile.x1 == tensor.width && tile.y1 == tensor.height;
+}
+
 // Flattens a tensor-indexed tile map into a single vector.
 auto FlattenTiles(const TilesByTensor& map) -> std::vector<Tile> {
     std::vector<Tile> out;
@@ -145,25 +152,65 @@ auto ComputeMapArea(const TilesByTensor& map) -> int64_t {
     return Tile::compute_non_overlapping_area(FlattenTiles(map));
 }
 
-// Computes how much additional area must be fetched for `required` given `resident`.
-// For each tensor, this is: union(required ∪ resident) - union(resident).
-auto ComputeMissingArea(const TilesByTensor& required, const TilesByTensor& resident) -> int64_t {
+// Computes how much area must be fetched for `required`.
+// Partial/tiled requirements are counted independently (renamed fetches, no overlap union).
+// Full-tensor requirements are deduplicated per tensor for this step.
+// Reuse is only taken when one resident tile fully covers a required tile.
+auto ComputeMissingArea(const Problem& problem, const TilesByTensor& required,
+                        const TilesByTensor& resident) -> int64_t {
     int64_t missing = 0;
 
     for (const auto& [tensor_idx, req_tiles] : required) {
         auto it = resident.find(tensor_idx);
-        std::vector<Tile> resident_tiles;
-        if (it != resident.end()) {
-            resident_tiles = it->second;
+        if (it == resident.end()) {
+            bool counted_full_fetch = false;
+            for (const Tile& req_tile : req_tiles) {
+                int64_t const req_area = req_tile.area();
+                if (req_area <= 0) {
+                    continue;
+                }
+                bool const req_is_full = IsFullTensorTile(problem, req_tile);
+                if (req_is_full && counted_full_fetch) {
+                    continue;
+                }
+                missing += req_area;
+                if (req_is_full) {
+                    counted_full_fetch = true;
+                }
+            }
+            continue;
         }
 
-        int64_t resident_area = Tile::compute_non_overlapping_area(resident_tiles);
+        const std::vector<Tile>& resident_tiles = it->second;
+        bool counted_full_fetch = false;
+        for (const Tile& req_tile : req_tiles) {
+            int64_t const req_area = req_tile.area();
+            if (req_area <= 0) {
+                continue;
+            }
+            bool const req_is_full = IsFullTensorTile(problem, req_tile);
+            if (req_is_full && counted_full_fetch) {
+                continue;
+            }
 
-        std::vector<Tile> combined = req_tiles;
-        combined.insert(combined.end(), resident_tiles.begin(), resident_tiles.end());
+            bool covered = false;
+            for (const Tile& resident_tile : resident_tiles) {
+                bool const fully_covers =
+                    resident_tile.x0 <= req_tile.x0 && resident_tile.x1 >= req_tile.x1 &&
+                    resident_tile.y0 <= req_tile.y0 && resident_tile.y1 >= req_tile.y1;
+                if (fully_covers) {
+                    covered = true;
+                    break;
+                }
+            }
 
-        int64_t combined_area = Tile::compute_non_overlapping_area(combined);
-        missing += std::max<int64_t>(0, combined_area - resident_area);
+            if (!covered) {
+                missing += req_area;
+            }
+            if (req_is_full) {
+                counted_full_fetch = true;
+            }
+        }
     }
 
     return missing;
@@ -588,8 +635,6 @@ auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
         const Op& op = problem.ops[op_idx];
 
         // Non-overlapping output area this op contributes in current step.
-        // This captures edge tiles (clipped area) and avoids duplicate counting when
-        // backward traversal reaches the same op-output tile through multiple paths.
         int64_t const required_output_area = Tile::compute_non_overlapping_area(req.output_tiles);
         if (required_output_area <= 0) {
             continue;
@@ -981,22 +1026,17 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
 
             // Slow-memory reads needed by boundary inputs that are not fully resident.
             int64_t const memory_in_elements =
-                ComputeMissingArea(reqs.required_boundary_inputs, resident_at_step);
+                ComputeMissingArea(problem_, reqs.required_boundary_inputs, resident_at_step);
 
             bool const is_last_k_step = (k_step_idx == (num_k_steps - 1));
-            bool const is_final_subgraph = (sg_idx + 1 == solution.subgraphs.size());
 
             // Boundary outputs written this step.
             // Suppress write for retained outputs and intermediate split-k accumulations.
             TilesByTensor write_outputs;
             for (const auto& [tensor_idx, tiles] : reqs.required_boundary_outputs) {
-                if (retained_for_next.contains(tensor_idx)) {
-                    // TODO: Check if we only care about this if it is final subgraph
-                    bool const force_write_final_subgraph_pure_output =
-                        is_final_subgraph && pure_output_tensors_.contains(tensor_idx);
-                    if (!force_write_final_subgraph_pure_output) {
-                        continue;
-                    }
+                bool const force_write_graph_output = pure_output_tensors_.contains(tensor_idx);
+                if (retained_for_next.contains(tensor_idx) && !force_write_graph_output) {
+                    continue;
                 }
                 if (locked_split_k_output_tensors.contains(tensor_idx) && !is_last_k_step) {
                     continue;
