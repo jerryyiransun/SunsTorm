@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -93,6 +94,10 @@ struct Solution {
 };
 
 absl::StatusOr<Solution> ReadSolution(const std::string& filename);
+
+auto SubgraphFitsFastMemory(const Problem& problem, const Solution& solution, size_t subgraph_idx,
+                            const std::set<size_t>& prev_retained_tensors,
+                            const std::vector<int>& producer_op) -> bool;
 
 absl::StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution);
 
