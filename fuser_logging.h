@@ -12,8 +12,7 @@
 namespace mlsys {
 
 struct FuserLoggingConfig {
-    bool enable_topk_candidate_logging = false;
-    int top_k = 0;
+    bool enable_logging = false;
     std::string log_directory = "logs";
     std::string benchmark_name = "unknown_benchmark";
     std::string solver_name = "GreedySolver";
@@ -33,8 +32,8 @@ struct FuserTopKCandidateLogData {
 
 void ConfigureFuserLogging(const FuserLoggingConfig& config);
 auto GetFuserLogPath() -> std::string;
-auto IsFuserTopKLoggingEnabled() -> bool;
-auto GetFuserTopKLimit() -> size_t;
+auto IsFuserLoggingEnabled() -> bool;
+void LogFuserDebugLine(const std::string& line);
 void LogFuserTopKCandidates(int depth, size_t total_candidates, size_t beam_width,
                             const std::vector<FuserTopKCandidateLogData>& candidates);
 

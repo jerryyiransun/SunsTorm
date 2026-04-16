@@ -18,7 +18,6 @@ namespace {
 
 struct FuserLogState {
     bool enabled = false;
-    size_t top_k = 0;
     std::string log_path;
 #if MLSYS_ENABLE_FUSER_LOGGING
     std::ofstream stream;
@@ -91,10 +90,9 @@ void ConfigureFuserLogging(const FuserLoggingConfig& config) {
     }
 
     g_fuser_log_state.enabled = false;
-    g_fuser_log_state.top_k = 0;
     g_fuser_log_state.log_path.clear();
 
-    if (config.enable_topk_candidate_logging == false || config.top_k <= 0) {
+    if (!config.enable_logging) {
         return;
     }
 
@@ -120,7 +118,6 @@ void ConfigureFuserLogging(const FuserLoggingConfig& config) {
     }
 
     g_fuser_log_state.enabled = true;
-    g_fuser_log_state.top_k = static_cast<size_t>(config.top_k);
     g_fuser_log_state.log_path = log_path.string();
 
     std::ostringstream header;
@@ -130,7 +127,6 @@ void ConfigureFuserLogging(const FuserLoggingConfig& config) {
 #else
     (void)config;
     g_fuser_log_state.enabled = false;
-    g_fuser_log_state.top_k = 0;
     g_fuser_log_state.log_path.clear();
 #endif
 }
@@ -139,37 +135,31 @@ auto GetFuserLogPath() -> std::string {
     return g_fuser_log_state.log_path;
 }
 
-auto IsFuserTopKLoggingEnabled() -> bool {
+auto IsFuserLoggingEnabled() -> bool {
 #if MLSYS_ENABLE_FUSER_LOGGING
-    return g_fuser_log_state.enabled && g_fuser_log_state.top_k > 0;
+    return g_fuser_log_state.enabled;
 #else
     return false;
-#endif
-}
-
-auto GetFuserTopKLimit() -> size_t {
-#if MLSYS_ENABLE_FUSER_LOGGING
-    return g_fuser_log_state.top_k;
-#else
-    return 0;
 #endif
 }
 
 void LogFuserTopKCandidates(int depth, size_t total_candidates, size_t beam_width,
                             const std::vector<FuserTopKCandidateLogData>& candidates) {
 #if MLSYS_ENABLE_FUSER_LOGGING
-    if (!IsFuserTopKLoggingEnabled()) {
+    if (!IsFuserLoggingEnabled()) {
         return;
     }
 
-    size_t const limit = std::min(beam_width, candidates.size());
+    size_t const beam_explored = std::min(beam_width, candidates.size());
+    size_t const top_k_logged = candidates.size();
 
     std::ostringstream header;
     header << "[BeamCandidates] depth=" << depth << ", total_ranked_candidates=" << total_candidates
-           << ", beam_width=" << beam_width << ", beam_explored=" << limit;
+           << ", beam_width=" << beam_width << ", beam_explored=" << beam_explored
+           << ", top_k_logged=" << top_k_logged;
     WriteFuserLogLine(header.str());
 
-    for (size_t idx = 0; idx < limit; ++idx) {
+    for (size_t idx = 0; idx < top_k_logged; ++idx) {
         FuserTopKCandidateLogData const& candidate = candidates[idx];
 
         std::ostringstream line;
@@ -192,6 +182,17 @@ void LogFuserTopKCandidates(int depth, size_t total_candidates, size_t beam_widt
     (void)total_candidates;
     (void)beam_width;
     (void)candidates;
+#endif
+}
+
+void LogFuserDebugLine(const std::string& line) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+    if (!IsFuserLoggingEnabled()) {
+        return;
+    }
+    WriteFuserLogLine(line);
+#else
+    (void)line;
 #endif
 }
 

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <optional>
 #include <queue>
@@ -83,7 +84,7 @@ struct RankedGreedyCandidate {
 void LogTopKCandidates(const std::vector<RankedGreedyCandidate>& ranked_candidates, int depth,
                        int beam_width) {
 #if MLSYS_ENABLE_FUSER_LOGGING
-    if (!IsFuserTopKLoggingEnabled()) {
+    if (!IsFuserLoggingEnabled()) {
         return;
     }
 
@@ -122,6 +123,26 @@ struct ExactEvaluation {
     double total_latency = 0.0;
 };
 
+struct FrameCandidateEvaluationLog {
+    std::string explore_id;
+    size_t rank = 0;
+    GreedyMoveType move = GreedyMoveType::kDirectFuse;
+    size_t producer_sg_idx = 0;
+    size_t consumer_sg_idx = 0;
+    bool valid = false;
+    double evaluated_cost = std::numeric_limits<double>::infinity();
+    double baseline_cost = std::numeric_limits<double>::infinity();
+    double delta_vs_baseline = std::numeric_limits<double>::infinity();
+};
+
+struct BestUpdateEvent {
+    int depth = 0;
+    size_t frame_seq = 0;
+    std::string explore_id;
+    double selected_latency = std::numeric_limits<double>::infinity();
+    Solution selected_solution;
+};
+
 struct EvaluatedCandidateResult {
     const GreedyCandidate* candidate = nullptr;
     bool improved = false;
@@ -148,11 +169,394 @@ struct SubgraphEdgeDegree {
 
 struct GreedySearchFrame {
     Solution state;
+    Solution evaluated_state;
+    bool has_evaluated_state = false;
     double current_cost = std::numeric_limits<double>::infinity();
     double base_cost = std::numeric_limits<double>::infinity();
     int remaining_lookahead = 0;
     int depth = 0;
 };
+
+auto FormatIndexListForLog(const std::vector<size_t>& values) -> std::string {
+    std::ostringstream out;
+    out << "[";
+    for (size_t idx = 0; idx < values.size(); ++idx) {
+        if (idx > 0) {
+            out << ",";
+        }
+        out << values[idx];
+    }
+    out << "]";
+    return out.str();
+}
+
+auto FormatSubgraphOpsListForLog(const Solution& solution) -> std::string {
+    std::ostringstream out;
+    out << "[";
+    for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
+        if (sg_idx > 0) {
+            out << ",";
+        }
+        out << FormatIndexListForLog(solution.subgraphs[sg_idx].ops);
+    }
+    out << "]";
+    return out.str();
+}
+
+auto FormatInt64ListForLog(const std::vector<int64_t>& values) -> std::string {
+    std::ostringstream out;
+    out << "[";
+    for (size_t idx = 0; idx < values.size(); ++idx) {
+        if (idx > 0) {
+            out << ",";
+        }
+        out << values[idx];
+    }
+    out << "]";
+    return out.str();
+}
+
+auto FormatTraversalOrderForLog(const std::optional<TraversalOrder>& traversal_order)
+    -> std::string {
+    if (!traversal_order.has_value()) {
+        return "null";
+    }
+    return FormatInt64ListForLog(*traversal_order);
+}
+
+auto FormatSolutionObjectForLog(const Solution& solution) -> std::string {
+    std::ostringstream out;
+    out << std::setprecision(17);
+    out << "{subgraphs=[";
+    for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
+        if (sg_idx > 0) {
+            out << ",";
+        }
+        const Subgraph& subgraph = solution.subgraphs[sg_idx];
+        out << "{idx=" << sg_idx << ",ops=" << FormatIndexListForLog(subgraph.ops)
+            << ",tensors_to_retain=" << FormatIndexListForLog(subgraph.tensors_to_retain)
+            << ",granularity=(" << subgraph.granularity.width << "x" << subgraph.granularity.height
+            << "x" << subgraph.granularity.depth << ")"
+            << ",traversal_order=" << FormatTraversalOrderForLog(subgraph.traversal_order)
+            << ",subgraph_latency=" << subgraph.subgraph_latency << "}";
+    }
+    out << "]}";
+    return out.str();
+}
+
+auto GetBaselineSolutionForFrame(const GreedySearchFrame& frame) -> const Solution& {
+    if (frame.has_evaluated_state) {
+        return frame.evaluated_state;
+    }
+    return frame.state;
+}
+
+auto BuildExploreId(int depth, size_t frame_seq, size_t rank_idx) -> std::string {
+    std::ostringstream out;
+    out << "exp_d" << depth << "_f" << frame_seq << "_r" << rank_idx;
+    return out.str();
+}
+
+auto SubgraphContainsAnyOp(const Subgraph& subgraph, const std::unordered_set<size_t>& impacted_ops)
+    -> bool {
+    for (size_t op_idx : subgraph.ops) {
+        if (impacted_ops.find(op_idx) != impacted_ops.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+auto FormatImpactedSubgraphOutputTileSizesForLog(const GreedyCandidate& candidate,
+                                                 const Solution& evaluated_solution)
+    -> std::string {
+    std::unordered_set<size_t> impacted_ops;
+    impacted_ops.insert(candidate.producer_subgraph_ops.begin(),
+                        candidate.producer_subgraph_ops.end());
+    impacted_ops.insert(candidate.consumer_subgraph_ops.begin(),
+                        candidate.consumer_subgraph_ops.end());
+
+    std::ostringstream out;
+    out << "[";
+    bool first = true;
+    for (size_t sg_idx = 0; sg_idx < evaluated_solution.subgraphs.size(); ++sg_idx) {
+        const Subgraph& subgraph = evaluated_solution.subgraphs[sg_idx];
+        if (!SubgraphContainsAnyOp(subgraph, impacted_ops)) {
+            continue;
+        }
+        if (!first) {
+            out << ",";
+        }
+        first = false;
+        out << "{sg=" << sg_idx << ",ops=" << FormatIndexListForLog(subgraph.ops)
+            << ",output_tile=(" << subgraph.granularity.width << "x" << subgraph.granularity.height
+            << "x" << subgraph.granularity.depth << ")}";
+    }
+    out << "]";
+    return out.str();
+}
+
+void LogSearchFrameState(const GreedySearchFrame& frame) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+    if (!IsFuserLoggingEnabled()) {
+        return;
+    }
+
+    const Solution& baseline_solution = GetBaselineSolutionForFrame(frame);
+    std::ostringstream line;
+    line << std::setprecision(17);
+    line << "[SearchFrameState] depth=" << frame.depth << ", current_cost=" << frame.current_cost
+         << ", base_cost=" << frame.base_cost
+         << ", remaining_lookahead=" << frame.remaining_lookahead
+         << ", subgraph_ops=" << FormatSubgraphOpsListForLog(baseline_solution);
+    LogFuserDebugLine(line.str());
+#else
+    (void)frame;
+#endif
+}
+
+void LogCandidateSkippedByBeamLimit(const std::string& explore_id, int depth, size_t rank_idx,
+                                    const RankedGreedyCandidate& ranked, size_t beam_limit) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+    if (!IsFuserLoggingEnabled()) {
+        return;
+    }
+
+    const GreedyCandidate& candidate = *ranked.candidate;
+    std::ostringstream line;
+    line << std::setprecision(17);
+    line << "[BeamCandidateResult] explore_id=" << explore_id << ", depth=" << depth
+         << ", rank=" << rank_idx << ", move=" << MoveTypeName(candidate.type) << ", pair=("
+         << candidate.producer_sg_idx << "->" << candidate.consumer_sg_idx
+         << "), result=not_evaluated_beam_limit_reached, beam_width=" << beam_limit;
+    LogFuserDebugLine(line.str());
+#else
+    (void)explore_id;
+    (void)depth;
+    (void)rank_idx;
+    (void)ranked;
+    (void)beam_limit;
+#endif
+}
+
+void LogCandidateEvaluationResult(const std::string& explore_id, int depth, size_t rank_idx,
+                                  const RankedGreedyCandidate& ranked,
+                                  const ExactEvaluation& evaluation, double current_cost,
+                                  double base_cost) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+    if (!IsFuserLoggingEnabled()) {
+        return;
+    }
+
+    const GreedyCandidate& candidate = *ranked.candidate;
+    std::ostringstream line;
+    line << "[BeamCandidateResult] explore_id=" << explore_id << ", depth=" << depth
+         << ", rank=" << rank_idx << ", move=" << MoveTypeName(candidate.type) << ", pair=("
+         << candidate.producer_sg_idx << "->" << candidate.consumer_sg_idx << ")";
+
+    if (!evaluation.valid) {
+        line << ", result=invalid_cost_model_estimate";
+        LogFuserDebugLine(line.str());
+        return;
+    }
+
+    double const delta_vs_current = evaluation.total_latency - current_cost;
+    double const delta_vs_base = evaluation.total_latency - base_cost;
+    if (delta_vs_current < 0.0) {
+        line << ", result=better, better_by=" << std::abs(delta_vs_current);
+    } else if (delta_vs_current > 0.0) {
+        line << ", result=worse, worse_by=" << delta_vs_current;
+    } else {
+        line << ", result=equal, change_by=0";
+    }
+    line << ", cost_model_total_latency=" << evaluation.total_latency
+         << ", delta_vs_current=" << delta_vs_current << ", delta_vs_base=" << delta_vs_base;
+    LogFuserDebugLine(line.str());
+#else
+    (void)explore_id;
+    (void)depth;
+    (void)rank_idx;
+    (void)ranked;
+    (void)evaluation;
+    (void)current_cost;
+    (void)base_cost;
+#endif
+}
+
+void LogCandidatePruned(const std::string& explore_id, int depth, size_t rank_idx,
+                        const RankedGreedyCandidate& ranked, const char* reason) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+    if (!IsFuserLoggingEnabled()) {
+        return;
+    }
+
+    const GreedyCandidate& candidate = *ranked.candidate;
+    std::ostringstream line;
+    line << "[BeamCandidatePruned] explore_id=" << explore_id << ", depth=" << depth
+         << ", rank=" << rank_idx << ", move=" << MoveTypeName(candidate.type) << ", pair=("
+         << candidate.producer_sg_idx << "->" << candidate.consumer_sg_idx
+         << "), reason=" << reason;
+    LogFuserDebugLine(line.str());
+#else
+    (void)explore_id;
+    (void)depth;
+    (void)rank_idx;
+    (void)ranked;
+    (void)reason;
+#endif
+}
+
+void LogExplorativeFusion(const std::string& explore_id, const GreedySearchFrame& parent_frame,
+                          size_t rank_idx, const RankedGreedyCandidate& ranked,
+                          const GreedySearchFrame& next_frame, const Solution& evaluated_solution) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+    if (!IsFuserLoggingEnabled()) {
+        return;
+    }
+
+    const GreedyCandidate& candidate = *ranked.candidate;
+    double const selected_minus_parent_cost = next_frame.current_cost - parent_frame.current_cost;
+    bool const improved = (selected_minus_parent_cost < 0.0);
+    const Solution& baseline_solution = GetBaselineSolutionForFrame(parent_frame);
+
+    std::ostringstream section1_header;
+    section1_header << std::setprecision(17);
+    section1_header << "[EXPLORATION_SECTION_1_BASELINE] explore_id=" << explore_id
+                    << ", depth=" << parent_frame.depth << ", rank=" << rank_idx
+                    << ", baseline_score=" << parent_frame.current_cost;
+    LogFuserDebugLine(section1_header.str());
+
+    std::ostringstream section1_body;
+    section1_body << "baseline_solution_object=" << FormatSolutionObjectForLog(baseline_solution);
+    LogFuserDebugLine(section1_body.str());
+
+    std::ostringstream section2_header;
+    section2_header << std::setprecision(17);
+    section2_header << "[EXPLORATION_SECTION_2_EXPLORED] explore_id=" << explore_id
+                    << ", depth=" << parent_frame.depth << ", rank=" << rank_idx
+                    << ", move=" << MoveTypeName(candidate.type) << ", pair=("
+                    << candidate.producer_sg_idx << "->" << candidate.consumer_sg_idx
+                    << "), explored_score=" << next_frame.current_cost
+                    << ", next_remaining_lookahead=" << next_frame.remaining_lookahead;
+    LogFuserDebugLine(section2_header.str());
+
+    std::ostringstream section2_body;
+    section2_body << "explored_solution_object=" << FormatSolutionObjectForLog(evaluated_solution);
+    LogFuserDebugLine(section2_body.str());
+
+    std::ostringstream pair_ops_line;
+    pair_ops_line << "explored_pair_ops=[" << FormatIndexListForLog(candidate.producer_subgraph_ops)
+                  << "," << FormatIndexListForLog(candidate.consumer_subgraph_ops) << "]";
+    LogFuserDebugLine(pair_ops_line.str());
+
+    if (candidate.type == GreedyMoveType::kRetain || candidate.type == GreedyMoveType::kCloneFuse) {
+        std::ostringstream impacted_line;
+        impacted_line << "impacted_subgraph_output_tile_sizes="
+                      << FormatImpactedSubgraphOutputTileSizesForLog(candidate, evaluated_solution);
+        LogFuserDebugLine(impacted_line.str());
+    }
+
+    std::ostringstream section3_line;
+    section3_line << std::setprecision(17);
+    section3_line << "[EXPLORATION_SECTION_3_DELTA] explore_id=" << explore_id
+                  << ", baseline_score=" << parent_frame.current_cost
+                  << ", explored_score=" << next_frame.current_cost
+                  << ", delta_cost=" << selected_minus_parent_cost << ", improved=" << improved;
+    LogFuserDebugLine(section3_line.str());
+#else
+    (void)explore_id;
+    (void)parent_frame;
+    (void)rank_idx;
+    (void)ranked;
+    (void)next_frame;
+    (void)evaluated_solution;
+#endif
+}
+
+void LogSelectedSolution(const BestUpdateEvent& event,
+                         const std::vector<FrameCandidateEvaluationLog>& frame_candidate_logs) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+    if (!IsFuserLoggingEnabled()) {
+        return;
+    }
+
+    LogFuserDebugLine("===SELECTED_SOLUTION=============================================");
+
+    std::ostringstream header;
+    header << std::setprecision(17);
+    header << "[SELECTED_SOLUTION] depth=" << event.depth << ", frame_seq=" << event.frame_seq
+           << ", selected_explore_id=" << event.explore_id
+           << ", selected_latency_cost=" << event.selected_latency;
+    LogFuserDebugLine(header.str());
+
+    std::ostringstream selected_solution_line;
+    selected_solution_line << "selected_solution_object="
+                           << FormatSolutionObjectForLog(event.selected_solution);
+    LogFuserDebugLine(selected_solution_line.str());
+
+    std::vector<const FrameCandidateEvaluationLog*> valid_logs;
+    valid_logs.reserve(frame_candidate_logs.size());
+    for (const FrameCandidateEvaluationLog& record : frame_candidate_logs) {
+        if (!record.valid) {
+            continue;
+        }
+        valid_logs.push_back(&record);
+    }
+
+    std::sort(valid_logs.begin(), valid_logs.end(),
+              [](const FrameCandidateEvaluationLog* lhs, const FrameCandidateEvaluationLog* rhs) {
+                  if (lhs->evaluated_cost != rhs->evaluated_cost) {
+                      return lhs->evaluated_cost < rhs->evaluated_cost;
+                  }
+                  return lhs->rank < rhs->rank;
+              });
+
+    size_t const limit = std::min<size_t>(5, valid_logs.size());
+    std::ostringstream top_header;
+    top_header << "[SELECTED_SOLUTION_TOP_CANDIDATES] count=" << limit;
+    LogFuserDebugLine(top_header.str());
+
+    for (size_t idx = 0; idx < limit; ++idx) {
+        const FrameCandidateEvaluationLog& record = *valid_logs[idx];
+        std::ostringstream line;
+        line << std::setprecision(17);
+        line << "top_idx=" << idx << ", explore_id=" << record.explore_id
+             << ", rank=" << record.rank << ", move=" << MoveTypeName(record.move) << ", pair=("
+             << record.producer_sg_idx << "->" << record.consumer_sg_idx
+             << "), evaluated_cost=" << record.evaluated_cost
+             << ", baseline_cost=" << record.baseline_cost
+             << ", delta_vs_baseline=" << record.delta_vs_baseline;
+        LogFuserDebugLine(line.str());
+    }
+#else
+    (void)event;
+    (void)frame_candidate_logs;
+#endif
+}
+
+void LogFinalBestSelection(const SearchContext& context) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+    if (!IsFuserLoggingEnabled()) {
+        return;
+    }
+
+    if (!context.has_best) {
+        LogFuserDebugLine("[SEARCH_FINAL_BEST] has_best=0");
+        return;
+    }
+
+    LogFuserDebugLine("===SEARCH_FINAL_BEST=============================================");
+
+    std::ostringstream line;
+    line << std::setprecision(17);
+    line << "[SEARCH_FINAL_BEST] has_best=1"
+         << ", final_latency_cost=" << context.best_cost
+         << ", final_best_solution_object=" << FormatSolutionObjectForLog(context.best_solution);
+    LogFuserDebugLine(line.str());
+#else
+    (void)context;
+#endif
+}
 
 auto BuildProducerOpIndex(const Problem& problem) -> std::vector<int> {
     std::vector<int> producer_op(problem.tensors.size(), -1);
@@ -911,15 +1315,17 @@ auto EvaluateCandidateState(SearchContext& context, const GreedyCandidate& candi
     return evaluation;
 }
 
-void MaybeUpdateBest(SearchContext& context, const ExactEvaluation& evaluation) {
+auto MaybeUpdateBest(SearchContext& context, const ExactEvaluation& evaluation) -> bool {
     if (!evaluation.valid) {
-        return;
+        return false;
     }
     if (!context.has_best || evaluation.total_latency < context.best_cost) {
         context.has_best = true;
         context.best_cost = evaluation.total_latency;
         context.best_solution = evaluation.solution;
+        return true;
     }
+    return false;
 }
 
 auto BuildSubgraphEdgeDegrees(const Problem& problem, const Solution& state)
@@ -1112,27 +1518,38 @@ auto TopScoringFusions(SearchContext& context, const Solution& state)
 }
 
 void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& context,
-                              const Solution& initial_state, double initial_cost) {
+                              const Solution& initial_state,
+                              const Solution& initial_evaluated_state,
+                              bool has_initial_evaluated_state, double initial_cost) {
     std::stack<GreedySearchFrame> fusion_stack;
     fusion_stack.push(GreedySearchFrame{
         .state = initial_state,
+        .evaluated_state = initial_evaluated_state,
+        .has_evaluated_state = has_initial_evaluated_state,
         .current_cost = initial_cost,
         .base_cost = initial_cost,
         .remaining_lookahead = 0,
         .depth = 0,
     });
+    size_t frame_seq = 0;
 
     while (!fusion_stack.empty()) {
+        size_t const current_frame_seq = frame_seq++;
         GreedySearchFrame frame = std::move(fusion_stack.top());
         fusion_stack.pop();
 
         if (frame.depth >= config.search_depth) {
             continue;
         }
+#if MLSYS_ENABLE_FUSER_LOGGING
+        LogSearchFrameState(frame);
+#endif
 
         const std::vector<GreedyCandidate>& candidates = TopScoringFusions(context, frame.state);
         std::vector<RankedGreedyCandidate> ranked_candidates = RankCandidatesByOpHitPenalty(
             candidates, context.topk_hits_by_op, config.topk_failure_penalty);
+        size_t const beam_limit =
+            config.beam_width <= 0 ? 0 : static_cast<size_t>(config.beam_width);
 #if MLSYS_ENABLE_FUSER_LOGGING
         LogTopKCandidates(ranked_candidates, frame.depth, config.beam_width);
 #endif
@@ -1141,13 +1558,41 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
         size_t valid_evaluated = 0;
         std::vector<EvaluatedCandidateResult> evaluated_candidates;
         evaluated_candidates.reserve(ranked_candidates.size());
+        std::vector<FrameCandidateEvaluationLog> frame_candidate_logs;
+        frame_candidate_logs.reserve(ranked_candidates.size());
+        std::vector<BestUpdateEvent> best_update_events;
+        best_update_events.reserve(ranked_candidates.size());
 
-        for (const RankedGreedyCandidate& ranked : ranked_candidates) {
-            if (valid_evaluated >= static_cast<size_t>(config.beam_width)) {
-                break;
+        for (size_t ranked_idx = 0; ranked_idx < ranked_candidates.size(); ++ranked_idx) {
+            const RankedGreedyCandidate& ranked = ranked_candidates[ranked_idx];
+            std::string const explore_id =
+                BuildExploreId(frame.depth, current_frame_seq, ranked_idx);
+            if (valid_evaluated >= beam_limit) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+                LogCandidateSkippedByBeamLimit(explore_id, frame.depth, ranked_idx, ranked,
+                                               beam_limit);
+#endif
+                continue;
             }
             const GreedyCandidate& candidate = *ranked.candidate;
             ExactEvaluation evaluation = EvaluateCandidateState(context, candidate);
+#if MLSYS_ENABLE_FUSER_LOGGING
+            LogCandidateEvaluationResult(explore_id, frame.depth, ranked_idx, ranked, evaluation,
+                                         frame.current_cost, frame.base_cost);
+#endif
+            FrameCandidateEvaluationLog frame_log_record;
+            frame_log_record.explore_id = explore_id;
+            frame_log_record.rank = ranked_idx;
+            frame_log_record.move = candidate.type;
+            frame_log_record.valid = evaluation.valid;
+            frame_log_record.evaluated_cost = evaluation.total_latency;
+            frame_log_record.baseline_cost = frame.current_cost;
+            frame_log_record.delta_vs_baseline = evaluation.total_latency - frame.current_cost;
+#if MLSYS_ENABLE_FUSER_LOGGING
+            frame_log_record.producer_sg_idx = candidate.producer_sg_idx;
+            frame_log_record.consumer_sg_idx = candidate.consumer_sg_idx;
+#endif
+            frame_candidate_logs.push_back(frame_log_record);
             bool candidate_improved = false;
             if (!evaluation.valid) {
                 evaluated_candidates.push_back(
@@ -1155,7 +1600,16 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
                 continue;
             }
             ++valid_evaluated;
-            MaybeUpdateBest(context, evaluation);
+            bool const best_updated = MaybeUpdateBest(context, evaluation);
+            if (best_updated) {
+                best_update_events.push_back(BestUpdateEvent{
+                    .depth = frame.depth,
+                    .frame_seq = current_frame_seq,
+                    .explore_id = explore_id,
+                    .selected_latency = evaluation.total_latency,
+                    .selected_solution = evaluation.solution,
+                });
+            }
             if (evaluation.total_latency < frame.current_cost) {
                 candidate_improved = true;
             }
@@ -1164,12 +1618,15 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
 
             GreedySearchFrame next_frame{
                 .state = candidate.solution,
+                .evaluated_state = evaluation.solution,
+                .has_evaluated_state = true,
                 .current_cost = evaluation.total_latency,
                 .base_cost = frame.base_cost,
                 .remaining_lookahead = frame.remaining_lookahead,
                 .depth = frame.depth + 1,
             };
 
+            bool selected_for_expansion = false;
             if (frame.remaining_lookahead == 0) {
                 if (next_frame.current_cost < frame.current_cost) {
                     next_frame.base_cost = next_frame.current_cost;
@@ -1178,23 +1635,36 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
                     next_frame.base_cost = frame.current_cost;
                     next_frame.remaining_lookahead = 2;
                 }
-                next_frames.push_back(std::move(next_frame));
-                continue;
-            }
-
-            if (next_frame.current_cost < frame.base_cost) {
+                selected_for_expansion = true;
+            } else if (next_frame.current_cost < frame.base_cost) {
                 next_frame.base_cost = next_frame.current_cost;
                 next_frame.remaining_lookahead = 0;
-                next_frames.push_back(std::move(next_frame));
-                continue;
-            }
-
-            if (frame.remaining_lookahead > 1) {
+                selected_for_expansion = true;
+            } else if (frame.remaining_lookahead > 1) {
                 next_frame.base_cost = frame.base_cost;
                 next_frame.remaining_lookahead = frame.remaining_lookahead - 1;
+                selected_for_expansion = true;
+            }
+
+            if (selected_for_expansion) {
+#if MLSYS_ENABLE_FUSER_LOGGING
+                LogExplorativeFusion(explore_id, frame, ranked_idx, ranked, next_frame,
+                                     evaluation.solution);
+#endif
                 next_frames.push_back(std::move(next_frame));
+            } else {
+#if MLSYS_ENABLE_FUSER_LOGGING
+                LogCandidatePruned(explore_id, frame.depth, ranked_idx, ranked,
+                                   "lookahead_exhausted_without_improvement");
+#endif
             }
         }
+
+#if MLSYS_ENABLE_FUSER_LOGGING
+        for (const BestUpdateEvent& event : best_update_events) {
+            LogSelectedSolution(event, frame_candidate_logs);
+        }
+#endif
 
         for (const EvaluatedCandidateResult& evaluated_candidate : evaluated_candidates) {
             if (evaluated_candidate.improved || evaluated_candidate.candidate == nullptr) {
@@ -1223,6 +1693,10 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
             fusion_stack.push(std::move(*next_it));
         }
     }
+
+#if MLSYS_ENABLE_FUSER_LOGGING
+    LogFinalBestSelection(context);
+#endif
 }
 auto BuildInitialGreedySolution(const Problem& problem, const TopologyInfo& topo,
                                 const std::vector<int>& producer_op,
@@ -1386,9 +1860,12 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
     const ExactEvaluation& root_evaluation = EvaluateCandidateState(context, root_candidate);
     MaybeUpdateBest(context, root_evaluation);
 
+    Solution const root_evaluated_solution =
+        root_evaluation.valid ? root_evaluation.solution : initial_solution;
     double const initial_cost = root_evaluation.valid ? root_evaluation.total_latency
                                                       : std::numeric_limits<double>::infinity();
-    RunGreedyLookaheadSearch(config_, context, initial_solution, initial_cost);
+    RunGreedyLookaheadSearch(config_, context, initial_solution, root_evaluated_solution,
+                             root_evaluation.valid, initial_cost);
 
     if (!context.has_best) {
         return absl::InternalError("Greedy fuser found no valid plans");

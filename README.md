@@ -55,59 +55,79 @@ Use `run_solver` for local experimentation when you want to choose a solver
 from the command line.
 
 ```bash
-./build-relwithdebinfo/run_solver <solver> <input.json> <output.json>
+./build-relwithdebinfo/run_solver <solver> <input.json> <output.json> [--fuser-log-dir=<dir>]
 
 # solver options
 # greedy | base | heuristic | brute_force
 ```
 
-## Fuser Top-K Candidate Logging
+## Fuser Beam Logging (Build + Run)
 
-`--fuser-log-top-k=<int>` enables greedy-fuser candidate logging and records the
-highest-scoring K candidates at each search depth.
+To produce a fuser log file, you must enable logging at both compile time and runtime.
 
-This logger is compile-time gated by `MLSYS_ENABLE_FUSER_LOGGING` and is **OFF
-by default** (submission-safe, no logger overhead in `mlsys`).
+1. Compile time: build with `-DMLSYS_ENABLE_FUSER_LOGGING=ON`
+2. Runtime: run `GreedySolver` (no logging enable flag required)
 
-Enable it for local analysis builds:
+Build a logging-enabled binary:
 
 ```bash
-cmake -S . -B build-relwithdebinfo -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMLSYS_ENABLE_FUSER_LOGGING=ON
-cmake --build build-relwithdebinfo -j
+cmake -S . -B build-relwithdebinfo-logging \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DMLSYS_ENABLE_FUSER_LOGGING=ON
+cmake --build build-relwithdebinfo-logging -j
 ```
 
-- If logging is compiled out, `run_solver --fuser-log-top-k=...` prints a warning and ignores it.
-- If `K=0`, runtime logging is disabled.
-- If `K>0`, each ranked candidate logs:
-  - move type and score
-  - producer/consumer subgraph pair and touched tensors
-  - `pair_subgraph_ops=[producer_ops,consumer_ops]`
-  - `candidate_solution_subgraphs_ops=[[ops...],[ops...],...]`
-- This applies to `GreedySolver` runs; for other solvers, the flag is ignored.
-
-Example:
+Run with logging enabled:
 
 ```bash
-./build-relwithdebinfo/run_solver greedy examples/example-3-input.json out.json \
-  --fuser-log-top-k=5 \
+./build-relwithdebinfo-logging/run_solver greedy benchmarks/mlsys-2026-1.json out.json \
   --fuser-log-dir=logs
 ```
 
-Additional logging flag:
+When logging is active, `run_solver` prints the exact output path:
 
-- `--fuser-log-dir=<dir>`: output directory for log files
+```text
+Fuser beam logging enabled: logs/<timestamp>_<benchmark>_<solver>_fuser_beam.log
+```
 
-Log filename format:
+Useful flags:
 
-- `<timestamp>_<benchmark>_<solver>_fuser_topk.log`
-- `benchmark` is derived from the input filename stem (for example `example-3-input`)
+- `--fuser-log-dir=<dir>`: output directory for log files (default: `logs`)
 
-Example log inspection:
+Notes:
+
+- `--fuser-log-top-k` has been removed.
+- If logging is compiled out, `run_solver` prints a warning for `GreedySolver` runs.
+- Logging is emitted automatically for `GreedySolver`.
+- For other solvers, fuser logging is disabled.
+
+Common log records include:
+
+- `[SearchFrameState] ... subgraph_ops=[[...],[...],...]`
+- `[BeamCandidates] ...`
+- `[BeamCandidateResult] ...`
+- `[EXPLORATION_SECTION_1_BASELINE] explore_id=... baseline_score=...`
+- `[EXPLORATION_SECTION_2_EXPLORED] explore_id=... explored_score=...`
+- `[EXPLORATION_SECTION_3_DELTA] explore_id=... delta_cost=... improved=...`
+- `===SELECTED_SOLUTION=============================================`
+- `[SELECTED_SOLUTION] ... selected_latency_cost=... selected_explore_id=...`
+- `[SELECTED_SOLUTION_TOP_CANDIDATES] count=...` followed by up to 5 candidates
+- `===SEARCH_FINAL_BEST=============================================` and `[SEARCH_FINAL_BEST] ... final_latency_cost=...`
+
+Marker behavior:
+
+- `FUSION_EXPLORATION_MARKER` has been removed.
+- `SELECTED_SOLUTION` is emitted only when global best latency strictly improves.
+- `SELECTED_SOLUTION` includes the selected latency and top evaluated candidates for that frame,
+  sorted by evaluated latency ascending, each with `explore_id`.
+- You can copy an `explore_id` from `SELECTED_SOLUTION` and search for matching
+  `EXPLORATION_SECTION_1/2/3` entries.
+
+Inspect the newest log:
 
 ```bash
-ls -1 logs/*_fuser_topk.log
-
-tail -n 100 logs/*_fuser_topk.log
+ls -1t logs/*_fuser_beam.log | head -n 1
+tail -n 100 logs/*_fuser_beam.log
 ```
 
 ## Profiling with `perf`

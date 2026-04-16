@@ -17,7 +17,6 @@ struct RunSolverOptions {
     std::string solver_choice;
     std::string input_path;
     std::string output_path;
-    int fuser_log_top_k = 0;
     std::string fuser_log_dir = "logs";
 };
 
@@ -30,24 +29,8 @@ enum class SolverKind {
 
 void PrintUsage() {
     std::cerr << "Usage: ./run_solver <solver> <path_to_input.json> <path_to_output.json> "
-                 "[--fuser-log-top-k=<int>] [--fuser-log-dir=<dir>]\n";
+                 "[--fuser-log-dir=<dir>]\n";
     std::cerr << "  solver: greedy | base | heuristic | brute_force\n";
-    std::cerr << "  --fuser-log-top-k is a legacy flag name; any positive value enables beam "
-                 "ranking logs.\n";
-}
-
-auto ParseNonNegativeInt(const std::string& value, int& parsed) -> bool {
-    try {
-        size_t consumed = 0;
-        int const v = std::stoi(value, &consumed);
-        if ((consumed == value.size()) == false || v < 0) {
-            return false;
-        }
-        parsed = v;
-        return true;
-    } catch (...) {
-        return false;
-    }
 }
 
 auto ToLower(std::string text) -> std::string {
@@ -128,17 +111,6 @@ auto ParseArgs(int argc, char* argv[], RunSolverOptions& options) -> bool {
     for (int i = 4; i < argc; ++i) {
         std::string const arg = argv[i];
 
-        if (arg.rfind("--fuser-log-top-k=", 0) == 0) {
-            std::string const value = arg.substr(std::string("--fuser-log-top-k=").size());
-            int parsed = 0;
-            if (ParseNonNegativeInt(value, parsed) == false) {
-                std::cerr << "Invalid --fuser-log-top-k value: " << value << "\n";
-                return false;
-            }
-            options.fuser_log_top_k = parsed;
-            continue;
-        }
-
         if (arg.rfind("--fuser-log-dir=", 0) == 0) {
             options.fuser_log_dir = arg.substr(std::string("--fuser-log-dir=").size());
             if (options.fuser_log_dir.empty()) {
@@ -172,26 +144,18 @@ auto main(int argc, char* argv[]) -> int {
     }
 
     std::string const solver_name = SolverName(solver_kind);
-
-    int requested_top_k = options.fuser_log_top_k;
-    if (requested_top_k > 0 && solver_kind != SolverKind::kGreedy) {
-        std::cerr
-            << "Warning: --fuser-log-top-k applies to GreedySolver only; disabling logging for "
-            << solver_name << ".\n";
-        requested_top_k = 0;
-    }
+    bool enable_fuser_logging = (solver_kind == SolverKind::kGreedy);
 
 #if !MLSYS_ENABLE_FUSER_LOGGING
-    if (requested_top_k > 0) {
+    if (enable_fuser_logging) {
         std::cerr << "Warning: fuser logging is compiled out. Rebuild with "
-                     "-DMLSYS_ENABLE_FUSER_LOGGING=ON to enable --fuser-log-top-k.\n";
-        requested_top_k = 0;
+                     "-DMLSYS_ENABLE_FUSER_LOGGING=ON to enable fuser logs.\n";
+        enable_fuser_logging = false;
     }
 #endif
 
     FuserLoggingConfig logging_config;
-    logging_config.enable_topk_candidate_logging = (requested_top_k > 0);
-    logging_config.top_k = requested_top_k;
+    logging_config.enable_logging = enable_fuser_logging;
     logging_config.log_directory = options.fuser_log_dir;
     logging_config.benchmark_name = BenchmarkNameFromInputPath(options.input_path);
     logging_config.solver_name = solver_name;
@@ -202,7 +166,7 @@ auto main(int argc, char* argv[]) -> int {
     std::cout << "Input file: " << options.input_path << "\n";
     std::cout << "Output file: " << options.output_path << "\n";
 
-    if (logging_config.enable_topk_candidate_logging) {
+    if (logging_config.enable_logging) {
         std::string const log_path = GetFuserLogPath();
         if (log_path.empty() == false) {
             std::cout << "Fuser beam logging enabled: " << log_path << "\n";
