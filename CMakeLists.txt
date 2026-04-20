@@ -57,6 +57,10 @@ target_link_libraries(mlsys PRIVATE mlsys_lib)
 add_executable(run_solver run_solver_main.cpp)
 target_link_libraries(run_solver PRIVATE mlsys_lib)
 
+# Debug-focused evaluator runner
+add_executable(evaluate_debug evaluate_debug.cpp)
+target_link_libraries(evaluate_debug PRIVATE mlsys_lib)
+
 include(GoogleTest)
 
 function(add_mlsys_test target)
@@ -78,6 +82,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(mlsys_lib PRIVATE DEBUG)
     target_compile_definitions(mlsys PRIVATE DEBUG)
     target_compile_definitions(run_solver PRIVATE DEBUG)
+    target_compile_definitions(evaluate_debug PRIVATE DEBUG)
     target_compile_definitions(evaluate_test PRIVATE DEBUG)
     target_compile_definitions(tiler_test PRIVATE DEBUG)
     target_compile_definitions(fuser_test PRIVATE DEBUG)

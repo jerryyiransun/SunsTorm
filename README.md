@@ -61,6 +61,32 @@ from the command line.
 # greedy | base | heuristic | brute_force
 ```
 
+## Debug Evaluator (`evaluate_debug`)
+
+Use `evaluate_debug` to run a custom problem JSON with debug evaluation output and
+auto-write the generated solution JSON using the test name.
+
+```bash
+# default output name: Benchmark1_WithTestJson_DebugOutput.json
+./build-debug/evaluate_debug <path/to/problem.json>
+
+# optional custom test name -> writes <test_name>.json
+./build-debug/evaluate_debug <path/to/problem.json> <test_name>
+```
+
+Examples:
+
+```bash
+./build-debug/evaluate_debug benchmarks/mlsys-2026-1.json
+./build-debug/evaluate_debug benchmarks/mlsys-2026-17.json MyDebugRun
+```
+
+Notes:
+
+- Build with `-DCMAKE_BUILD_TYPE=Debug` to see evaluator debug logs.
+- Output JSON is written to the current working directory.
+- Default output file is `Benchmark1_WithTestJson_DebugOutput.json`.
+
 ## Fuser Beam Logging (Build + Run)
 
 To produce a fuser log file, you must enable logging at both compile time and runtime.
