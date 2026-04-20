@@ -134,7 +134,7 @@ TEST(FuserTest, GreedyFindsDiamondRecomputationSchedule) {
     ExpectGreedySolutionValid(problem, *solution);
 }
 
-TEST(FuserTest, PrefuseHandlesPointwiseInsideMultiOpCurrentSubgraph) {
+TEST(FuserTest, PrefuseFusesThroughUnaryChainThenStopsAtMultiInputConsumer) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 128, .height = 128},
@@ -154,12 +154,13 @@ TEST(FuserTest, PrefuseHandlesPointwiseInsideMultiOpCurrentSubgraph) {
     auto solution = fuser.fuse(problem);
     ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    ASSERT_EQ(solution->subgraphs.size(), 1u);
-    EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0, 1, 2, 3}));
+    ASSERT_EQ(solution->subgraphs.size(), 2u);
+    EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0, 1, 2}));
+    EXPECT_EQ(solution->subgraphs[1].ops, std::vector<size_t>({3}));
     ExpectGreedySolutionValid(problem, *solution);
 }
 
-TEST(FuserTest, PrefuseCaseBFusesPointwiseOutputIntoUniquePointwiseTarget) {
+TEST(FuserTest, PrefuseDoesNotTreatMultiInputPointwiseConsumerAsFree) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 128, .height = 128},
@@ -179,21 +180,24 @@ TEST(FuserTest, PrefuseCaseBFusesPointwiseOutputIntoUniquePointwiseTarget) {
     auto solution = fuser.fuse(problem);
     ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    ASSERT_EQ(solution->subgraphs.size(), 1u);
-    EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0, 1}));
+    ASSERT_EQ(solution->subgraphs.size(), 2u);
+    EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0}));
+    EXPECT_EQ(solution->subgraphs[1].ops, std::vector<size_t>({1}));
     ExpectGreedySolutionValid(problem, *solution);
 }
 
-TEST(FuserTest, PrefuseCaseBBlocksWhenOutputHasExternalConsumer) {
+TEST(FuserTest, PrefuseSkipsDirectMergeWhenProducerOutputHasAnotherConsumer) {
     mlsys::Problem problem;
     problem.tensors = {
-        {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 128, .height = 128},
-        {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
     };
     problem.ops = {
         {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 10},
-        {.op_type = "Pointwise", .inputs = {1, 2}, .outputs = {3}, .base_cost = 10},
-        {.op_type = "Pointwise", .inputs = {1, 4}, .outputs = {5}, .base_cost = 10},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 10},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {3}, .base_cost = 10},
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
@@ -210,7 +214,7 @@ TEST(FuserTest, PrefuseCaseBBlocksWhenOutputHasExternalConsumer) {
     ExpectGreedySolutionValid(problem, *solution);
 }
 
-TEST(FuserTest, PrefuseCaseBBlocksWhenConsumerIsNotPointwise) {
+TEST(FuserTest, PrefuseDoesNotHardFuseIntoMatMulConsumer) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 32, .height = 32},
@@ -236,7 +240,7 @@ TEST(FuserTest, PrefuseCaseBBlocksWhenConsumerIsNotPointwise) {
     ExpectGreedySolutionValid(problem, *solution);
 }
 
-TEST(FuserTest, PrefuseCaseAAllowsMatMulProducerForNow) {
+TEST(FuserTest, PrefuseFusesMatMulProducerIntoUnaryPointwiseConsumer) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 32, .height = 32},
@@ -252,7 +256,6 @@ TEST(FuserTest, PrefuseCaseAAllowsMatMulProducerForNow) {
     problem.slow_memory_bandwidth = 10;
     problem.native_granularity = {.width = 32, .height = 32, .depth = 1};
 
-    // TODO: This behavior is intentionally broad until Case-A MatMul filtering is made tiler-aware.
     mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
     auto solution = fuser.fuse(problem);
     ASSERT_TRUE(solution.ok()) << solution.status().message();

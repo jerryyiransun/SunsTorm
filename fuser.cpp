@@ -151,7 +151,6 @@ struct EvaluatedCandidateResult {
 struct SearchContext {
     const Problem& problem;
     const std::vector<int>& producer_op;
-    const std::vector<std::vector<size_t>>& consumers_by_tensor;
     const TopologyInfo& topo;
     GreedyTiler tiler;
     CostModel cost_model;
@@ -568,16 +567,6 @@ auto BuildProducerOpIndex(const Problem& problem) -> std::vector<int> {
     return producer_op;
 }
 
-auto BuildConsumersByTensor(const Problem& problem) -> std::vector<std::vector<size_t>> {
-    std::vector<std::vector<size_t>> consumers(problem.tensors.size());
-    for (size_t op_idx = 0; op_idx < problem.ops.size(); ++op_idx) {
-        for (size_t tensor_idx : problem.ops[op_idx].inputs) {
-            consumers[tensor_idx].push_back(op_idx);
-        }
-    }
-    return consumers;
-}
-
 auto BuildTopologicalOrder(const Problem& problem) -> StatusOr<TopologyInfo> {
     size_t const num_ops = problem.ops.size();
     TopologyInfo topo;
@@ -911,24 +900,20 @@ auto FindLatestSubgraphContainingOp(const Solution& solution, size_t op_idx, siz
     return std::nullopt;
 }
 
-void PrefuseUnaryUniquePointwise(const Problem& problem, const std::vector<int>& producer_op,
-                                 const std::vector<std::vector<size_t>>& consumers_by_tensor,
-                                 const std::vector<size_t>& topo_rank, Solution& solution) {
-    auto subgraph_contains_op = [&](const Subgraph& subgraph, size_t op_idx) -> bool {
-        return std::find(subgraph.ops.begin(), subgraph.ops.end(), op_idx) != subgraph.ops.end();
-    };
-
+void PrefuseProducerIntoUnaryPointwiseConsumers(const Problem& problem,
+                                                const std::vector<int>& producer_op,
+                                                const std::vector<size_t>& topo_rank,
+                                                Solution& solution) {
     while (true) {
         bool changed = false;
         for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
             const auto& current_subgraph = solution.subgraphs[sg_idx];
             for (size_t pointwise_op_idx : current_subgraph.ops) {
                 const Op& pointwise_op = problem.ops[pointwise_op_idx];
-                if (pointwise_op.inputs.size() != 1) {
+                if (pointwise_op.op_type != "Pointwise" || pointwise_op.inputs.size() != 1) {
                     continue;
                 }
 
-                // Case A: shared tensor is the unary pointwise input.
                 size_t const input_tensor = pointwise_op.inputs[0];
                 int const producer = producer_op[input_tensor];
                 if (producer >= 0) {
@@ -947,59 +932,6 @@ void PrefuseUnaryUniquePointwise(const Problem& problem, const std::vector<int>&
                         }
                     }
                 }
-
-                if (changed) {
-                    break;
-                }
-
-                // Case B: shared tensor is the unary pointwise output.
-                size_t const output_tensor = pointwise_op.outputs[0];
-                const auto& output_consumers = consumers_by_tensor[output_tensor];
-                if (output_consumers.empty()) {
-                    continue;
-                }
-
-                bool all_consumers_pointwise = true;
-                for (size_t consumer_op_idx : output_consumers) {
-                    if (problem.ops[consumer_op_idx].op_type != "Pointwise") {
-                        all_consumers_pointwise = false;
-                        break;
-                    }
-                }
-                if (!all_consumers_pointwise) {
-                    continue;
-                }
-
-                std::optional<size_t> target_sg_idx;
-                for (size_t candidate_sg_idx = sg_idx + 1;
-                     candidate_sg_idx < solution.subgraphs.size(); ++candidate_sg_idx) {
-                    bool all_consumers_in_candidate = true;
-                    for (size_t consumer_op_idx : output_consumers) {
-                        if (!subgraph_contains_op(solution.subgraphs[candidate_sg_idx],
-                                                  consumer_op_idx)) {
-                            all_consumers_in_candidate = false;
-                            break;
-                        }
-                    }
-
-                    if (all_consumers_in_candidate) {
-                        target_sg_idx = candidate_sg_idx;
-                        break;
-                    }
-                }
-                if (!target_sg_idx.has_value()) {
-                    continue;
-                }
-
-                Solution candidate =
-                    BuildDirectMergeSolution(solution, sg_idx, target_sg_idx.value(), topo_rank);
-                if (!NormalizeAndValidateSolution(problem, topo_rank, producer_op, candidate)) {
-                    continue;
-                }
-
-                solution = std::move(candidate);
-                changed = true;
-                break;
             }
 
             if (changed) {
@@ -1398,67 +1330,6 @@ void PrefuseLinearUniqueChains(const Problem& problem, const std::vector<int>& p
     }
 }
 
-void PrefuseFreeUnaryChains(const Problem& problem, const std::vector<int>& producer_op,
-                            const std::vector<std::vector<size_t>>& consumers_by_tensor,
-                            const std::vector<size_t>& topo_rank, Solution& solution) {
-    auto subgraph_all_unary = [&](const Subgraph& subgraph) -> bool {
-        for (size_t op_idx : subgraph.ops) {
-            if (problem.ops[op_idx].inputs.size() != 1) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    while (true) {
-        bool changed = false;
-        auto usages = BuildSubgraphUsages(problem, solution);
-
-        for (size_t producer_sg_idx = 0; producer_sg_idx < solution.subgraphs.size();
-             ++producer_sg_idx) {
-            if (!subgraph_all_unary(solution.subgraphs[producer_sg_idx])) {
-                continue;
-            }
-
-            for (size_t consumer_sg_idx = producer_sg_idx + 1;
-                 consumer_sg_idx < solution.subgraphs.size(); ++consumer_sg_idx) {
-                if (!subgraph_all_unary(solution.subgraphs[consumer_sg_idx])) {
-                    continue;
-                }
-
-                std::vector<size_t> const shared_tensors =
-                    SharedProducerConsumerTensors(usages[producer_sg_idx], usages[consumer_sg_idx]);
-                if (shared_tensors.size() != 1) {
-                    continue;
-                }
-
-                size_t const boundary_tensor = shared_tensors[0];
-                if (consumers_by_tensor[boundary_tensor].size() != 1) {
-                    continue;
-                }
-
-                Solution merged =
-                    BuildDirectMergeSolution(solution, producer_sg_idx, consumer_sg_idx, topo_rank);
-                if (!NormalizeAndValidateSolution(problem, topo_rank, producer_op, merged)) {
-                    continue;
-                }
-
-                solution = std::move(merged);
-                changed = true;
-                break;
-            }
-
-            if (changed) {
-                break;
-            }
-        }
-
-        if (!changed) {
-            return;
-        }
-    }
-}
-
 auto ComputeCandidateOpHitSum(const GreedyCandidate& candidate,
                               const std::unordered_map<size_t, double>& topk_hits_by_op) -> double {
     double op_hit_sum = 0.0;
@@ -1699,9 +1570,7 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
 #endif
 }
 auto BuildInitialGreedySolution(const Problem& problem, const TopologyInfo& topo,
-                                const std::vector<int>& producer_op,
-                                const std::vector<std::vector<size_t>>& consumers_by_tensor)
-    -> StatusOr<Solution> {
+                                const std::vector<int>& producer_op) -> StatusOr<Solution> {
     Solution initial_solution;
     for (size_t op_idx : topo.order) {
         Subgraph subgraph;
@@ -1712,7 +1581,7 @@ auto BuildInitialGreedySolution(const Problem& problem, const TopologyInfo& topo
         initial_solution.subgraphs.push_back(subgraph);
     }
 
-    PrefuseFreeUnaryChains(problem, producer_op, consumers_by_tensor, topo.rank, initial_solution);
+    PrefuseProducerIntoUnaryPointwiseConsumers(problem, producer_op, topo.rank, initial_solution);
 
     if (!NormalizeAndValidateSolution(problem, topo.rank, producer_op, initial_solution)) {
         return absl::FailedPreconditionError("Failed to build a valid initial greedy solution");
@@ -1834,9 +1703,7 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
     TopologyInfo topo = topo_or.value();
 
     std::vector<int> producer_op = BuildProducerOpIndex(problem);
-    std::vector<std::vector<size_t>> consumers_by_tensor = BuildConsumersByTensor(problem);
-    auto initial_solution_or =
-        BuildInitialGreedySolution(problem, topo, producer_op, consumers_by_tensor);
+    auto initial_solution_or = BuildInitialGreedySolution(problem, topo, producer_op);
     if (!initial_solution_or.ok()) {
         return initial_solution_or.status();
     }
@@ -1845,7 +1712,6 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
     SearchContext context{
         .problem = problem,
         .producer_op = producer_op,
-        .consumers_by_tensor = consumers_by_tensor,
         .topo = topo,
         .tiler = GreedyTiler(),
         .cost_model = CostModel(problem),
