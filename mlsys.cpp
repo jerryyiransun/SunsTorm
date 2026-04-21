@@ -363,7 +363,7 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
         if (op_idx == -1 || !subgraph_ops.contains(static_cast<size_t>(op_idx))) {
 #ifdef DEBUG
             if (emit_debug) {
-                std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx
+                std::cout << "[DEBUG] Visit Tensor " << curr_tensor_idx
                           << " req_w=" << curr_tensor_dim.width
                           << " req_h=" << curr_tensor_dim.height << " is_final=" << is_final
                           << (op_idx == -1 ? " from OP -1 (Global Input)\n"
@@ -380,7 +380,7 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
 
 #ifdef DEBUG
         if (emit_debug) {
-            std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx
+            std::cout << "[DEBUG] Visit Tensor " << curr_tensor_idx
                       << " req_w=" << curr_tensor_dim.width << " req_h=" << curr_tensor_dim.height
                       << " is_final=" << is_final << " from OP " << op_idx << "\n";
         }

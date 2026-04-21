@@ -34,12 +34,14 @@ TEST(EvaluateTest, Example1_Fail_MissedOutput) {
     ExpectFail("example-1-input.json", "example-1-output-F-missed-output.json", "[Missed Output]");
 }
 
-TEST(EvaluateTest, Example2_OutputA_Pass) {
-    ExpectPass("example-2-input.json", "example-2-output-A.json");
+TEST(EvaluateTest, Example2_OutputA_Fail_Capacity) {
+    ExpectFail("example-2-input.json", "example-2-output-A.json",
+               "[Fast Memory Capacity Exceeded]");
 }
 
-TEST(EvaluateTest, Example2_OutputB_Pass) {
-    ExpectPass("example-2-input.json", "example-2-output-B.json");
+TEST(EvaluateTest, Example2_OutputB_Fail_Capacity) {
+    ExpectFail("example-2-input.json", "example-2-output-B.json",
+               "[Fast Memory Capacity Exceeded]");
 }
 
 TEST(EvaluateTest, Example3_OutputA_Pass) {
@@ -356,6 +358,42 @@ TEST(EvaluateTest, UnaryPointwiseEphemeralInputRemainsFreeInsideSubgraph) {
     sg.ops = {0, 1};
     sg.tensors_to_retain = {};
     sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 1.0, 1e-9);
+}
+
+TEST(EvaluateTest, FusedMatMulChainMiddleTensorIsEphemeralForCapacity) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // t0 lhs of op0
+        {.width = 64, .height = 64}, // t1 rhs of op0
+        {.width = 64, .height = 64}, // t2 output of op0, input(lhs) of op1 (middle tensor)
+        {.width = 64, .height = 64}, // t3 rhs of op1
+        {.width = 64, .height = 64}, // t4 output of op1
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1}, // op0
+        {.op_type = "MatMul", .inputs = {2, 3}, .outputs = {4}, .base_cost = 1}, // op1
+    };
+    // For granularity 64x64x64 in one fused subgraph:
+    // - output tile t4: 4096
+    // - boundary inputs t3, t0, t1: 3 * 4096
+    // Total with t2 ephemeral = 16384 (passes).
+    // If t2 were charged as non-ephemeral, total would be 20480 (fails).
+    problem.fast_memory_capacity = 18'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 64};
     sg.traversal_order = std::nullopt;
     sg.subgraph_latency = 1.0;
 
