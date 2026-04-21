@@ -809,9 +809,11 @@ auto CostModel::cache_stats() const -> CacheStats {
     };
 }
 
-auto CostModel::build_subgraph_cache_key(const Subgraph& subgraph,
+auto CostModel::build_subgraph_cache_key(const Solution& solution, size_t sg_idx,
                                          const std::set<size_t>& prev_retained_tensors) const
     -> SubgraphCacheKey {
+    const Subgraph& subgraph = solution.subgraphs[sg_idx];
+
     SubgraphCacheKey key;
     key.ops = subgraph.ops;
     key.tensors_to_retain = subgraph.tensors_to_retain;
@@ -820,6 +822,16 @@ auto CostModel::build_subgraph_cache_key(const Subgraph& subgraph,
     key.traversal_order = subgraph.traversal_order;
     key.prev_retained_tensors.assign(prev_retained_tensors.begin(), prev_retained_tensors.end());
     std::sort(key.prev_retained_tensors.begin(), key.prev_retained_tensors.end());
+
+    key.suffix_ops.reserve(solution.subgraphs.size() - sg_idx);
+    key.suffix_tensors_to_retain.reserve(solution.subgraphs.size() - sg_idx);
+    for (size_t idx = sg_idx; idx < solution.subgraphs.size(); ++idx) {
+        key.suffix_ops.push_back(solution.subgraphs[idx].ops);
+        std::vector<size_t> retained = solution.subgraphs[idx].tensors_to_retain;
+        std::sort(retained.begin(), retained.end());
+        key.suffix_tensors_to_retain.push_back(std::move(retained));
+    }
+
     return key;
 }
 
@@ -1070,6 +1082,40 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
     return subgraph_latency;
 }
 
+auto CostModel::estimate_subgraph_latency(const Solution& solution, size_t sg_idx,
+                                          const std::set<size_t>& prev_retained_tensors)
+    -> StatusOr<SubgraphLatency> {
+    if (problem_.slow_memory_bandwidth <= 0) {
+        return absl::InvalidArgumentError("CostModel: slow_memory_bandwidth must be positive");
+    }
+    if (sg_idx >= solution.subgraphs.size()) {
+        return absl::InvalidArgumentError("CostModel: subgraph index out of range");
+    }
+
+    SubgraphCacheKey const cache_key =
+        build_subgraph_cache_key(solution, sg_idx, prev_retained_tensors);
+    auto cache_it = subgraph_latency_cache_.find(cache_key);
+    if (cache_it != subgraph_latency_cache_.end()) {
+        if (enable_cache_stats_) {
+            ++cache_hits_;
+        }
+        return cache_it->second;
+    }
+
+    if (enable_cache_stats_) {
+        ++cache_misses_;
+        ++estimate_subgraph_calls_;
+    }
+
+    auto subgraph_latency_or = estimate_subgraph(solution, sg_idx, prev_retained_tensors);
+    if (!subgraph_latency_or.ok()) {
+        return subgraph_latency_or.status();
+    }
+
+    subgraph_latency_cache_[cache_key] = subgraph_latency_or.value();
+    return subgraph_latency_or.value();
+}
+
 // Estimates all subgraph latencies for a proposed solution and returns
 // both the updated solution and total latency.
 auto CostModel::estimate(const Solution& solution)
@@ -1087,58 +1133,12 @@ auto CostModel::estimate(const Solution& solution)
     for (size_t sg_idx = 0; sg_idx < estimated_solution.subgraphs.size(); ++sg_idx) {
         Subgraph& subgraph = estimated_solution.subgraphs[sg_idx];
 
-        SubgraphCacheKey const cache_key =
-            build_subgraph_cache_key(subgraph, prev_retained_tensors);
-#ifdef DEBUG
-        auto const format_subgraph_cache_key = [](const auto& key) -> std::string {
-            std::ostringstream oss;
-            oss << "{ops=" << FormatVector(key.ops)
-                << ", tensors_to_retain=" << FormatVector(key.tensors_to_retain)
-                << ", granularity={width=" << key.granularity.width
-                << ", height=" << key.granularity.height << ", depth=" << key.granularity.depth
-                << "}"
-                << ", traversal_order=" << FormatTraversalOrder(key.traversal_order)
-                << ", prev_retained_tensors=" << FormatVector(key.prev_retained_tensors) << "}";
-            return oss.str();
-        };
-        std::string const cache_key_debug = format_subgraph_cache_key(cache_key);
-        std::cout << "[DEBUG] evaluate() current SubgraphCacheKey for subgraph " << sg_idx << ": "
-                  << cache_key_debug << "\n";
-#endif
-
-        SubgraphLatency subgraph_latency = 0.0;
-        auto cache_it = subgraph_latency_cache_.find(cache_key);
-        if (cache_it != subgraph_latency_cache_.end()) {
-            if (enable_cache_stats_) {
-                ++cache_hits_;
-            }
-            subgraph_latency = cache_it->second;
-#ifdef DEBUG
-            std::cout << "[DEBUG] Cache hit for subgraph " << sg_idx << " with SubgraphCacheKey "
-                      << cache_key_debug << "; cached latency=" << subgraph_latency << "\n";
-#endif
-        } else {
-#ifdef DEBUG
-            std::cout << "[DEBUG] Cache miss for subgraph " << sg_idx << " with SubgraphCacheKey "
-                      << cache_key_debug << "\n";
-#endif
-            if (enable_cache_stats_) {
-                ++cache_misses_;
-                ++estimate_subgraph_calls_;
-            }
-
-            auto subgraph_latency_or =
-                estimate_subgraph(estimated_solution, sg_idx, prev_retained_tensors);
-            if (!subgraph_latency_or.ok()) {
-                return subgraph_latency_or.status();
-            }
-            subgraph_latency = subgraph_latency_or.value();
-            subgraph_latency_cache_[cache_key] = subgraph_latency;
-#ifdef DEBUG
-            std::cout << "[DEBUG] Added SubgraphCacheKey to cache for subgraph " << sg_idx << ": "
-                      << cache_key_debug << "; computed latency=" << subgraph_latency << "\n";
-#endif
+        auto subgraph_latency_or =
+            estimate_subgraph_latency(estimated_solution, sg_idx, prev_retained_tensors);
+        if (!subgraph_latency_or.ok()) {
+            return subgraph_latency_or.status();
         }
+        SubgraphLatency const subgraph_latency = subgraph_latency_or.value();
 
         subgraph.subgraph_latency = subgraph_latency;
         total_latency += subgraph_latency;

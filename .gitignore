@@ -4,3 +4,5 @@ out.json
 md_plans/
 .vscode/
 .codex
+logs/
+compile_commands.json
