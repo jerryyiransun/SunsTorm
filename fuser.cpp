@@ -202,6 +202,19 @@ auto FormatSubgraphOpsListForLog(const Solution& solution) -> std::string {
     return out.str();
 }
 
+auto FormatSubgraphRetainsListForLog(const Solution& solution) -> std::string {
+    std::ostringstream out;
+    out << "[";
+    for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
+        if (sg_idx > 0) {
+            out << ",";
+        }
+        out << FormatIndexListForLog(solution.subgraphs[sg_idx].tensors_to_retain);
+    }
+    out << "]";
+    return out.str();
+}
+
 auto FormatInt64ListForLog(const std::vector<int64_t>& values) -> std::string {
     std::ostringstream out;
     out << "[";
@@ -223,24 +236,73 @@ auto FormatTraversalOrderForLog(const std::optional<TraversalOrder>& traversal_o
     return FormatInt64ListForLog(*traversal_order);
 }
 
-auto FormatSolutionObjectForLog(const Solution& solution) -> std::string {
+auto FormatGranularityForLog(const Granularity& granularity) -> std::string {
     std::ostringstream out;
-    out << std::setprecision(17);
-    out << "{subgraphs=[";
+    out << "(" << granularity.width << "x" << granularity.height << "x" << granularity.depth << ")";
+    return out.str();
+}
+
+auto FormatSubgraphGranularityListForLog(const Solution& solution) -> std::string {
+    std::ostringstream out;
+    out << "[";
     for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
         if (sg_idx > 0) {
             out << ",";
         }
-        const Subgraph& subgraph = solution.subgraphs[sg_idx];
-        out << "{idx=" << sg_idx << ",ops=" << FormatIndexListForLog(subgraph.ops)
-            << ",tensors_to_retain=" << FormatIndexListForLog(subgraph.tensors_to_retain)
-            << ",granularity=(" << subgraph.granularity.width << "x" << subgraph.granularity.height
-            << "x" << subgraph.granularity.depth << ")"
-            << ",traversal_order=" << FormatTraversalOrderForLog(subgraph.traversal_order)
-            << ",subgraph_latency=" << subgraph.subgraph_latency << "}";
+        out << FormatGranularityForLog(solution.subgraphs[sg_idx].granularity);
     }
-    out << "]}";
+    out << "]";
     return out.str();
+}
+
+auto FormatSubgraphTraversalOrdersListForLog(const Solution& solution) -> std::string {
+    std::ostringstream out;
+    out << "[";
+    for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
+        if (sg_idx > 0) {
+            out << ",";
+        }
+        out << FormatTraversalOrderForLog(solution.subgraphs[sg_idx].traversal_order);
+    }
+    out << "]";
+    return out.str();
+}
+
+auto FormatSubgraphLatencyListForLog(const Solution& solution) -> std::string {
+    std::ostringstream out;
+    out << std::setprecision(17);
+    out << "[";
+    for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
+        if (sg_idx > 0) {
+            out << ",";
+        }
+        out << solution.subgraphs[sg_idx].subgraph_latency;
+    }
+    out << "]";
+    return out.str();
+}
+
+void LogSolutionArraysForLog(const std::string& label, const Solution& solution) {
+    std::ostringstream subgraphs_line;
+    subgraphs_line << label << "_subgraphs=" << FormatSubgraphOpsListForLog(solution);
+    LogFuserDebugLine(subgraphs_line.str());
+
+    std::ostringstream retain_line;
+    retain_line << label << "_tensors_to_retain=" << FormatSubgraphRetainsListForLog(solution);
+    LogFuserDebugLine(retain_line.str());
+
+    std::ostringstream granularity_line;
+    granularity_line << label << "_granularity=" << FormatSubgraphGranularityListForLog(solution);
+    LogFuserDebugLine(granularity_line.str());
+
+    std::ostringstream traversal_line;
+    traversal_line << label
+                   << "_traversal_order=" << FormatSubgraphTraversalOrdersListForLog(solution);
+    LogFuserDebugLine(traversal_line.str());
+
+    std::ostringstream latency_line;
+    latency_line << label << "_subgraph_latency=" << FormatSubgraphLatencyListForLog(solution);
+    LogFuserDebugLine(latency_line.str());
 }
 
 auto GetBaselineSolutionForFrame(const GreedySearchFrame& frame) -> const Solution& {
@@ -418,6 +480,8 @@ void LogExplorativeFusion(const std::string& explore_id, const GreedySearchFrame
     bool const improved = (selected_minus_parent_cost < 0.0);
     const Solution& baseline_solution = GetBaselineSolutionForFrame(parent_frame);
 
+    LogFuserDebugLine("===EXPLORATION_GROUP=============================================");
+
     std::ostringstream section1_header;
     section1_header << std::setprecision(17);
     section1_header << "[EXPLORATION_SECTION_1_BASELINE] explore_id=" << explore_id
@@ -425,9 +489,7 @@ void LogExplorativeFusion(const std::string& explore_id, const GreedySearchFrame
                     << ", baseline_score=" << parent_frame.current_cost;
     LogFuserDebugLine(section1_header.str());
 
-    std::ostringstream section1_body;
-    section1_body << "baseline_solution_object=" << FormatSolutionObjectForLog(baseline_solution);
-    LogFuserDebugLine(section1_body.str());
+    LogSolutionArraysForLog("baseline_solution", baseline_solution);
 
     std::ostringstream section2_header;
     section2_header << std::setprecision(17);
@@ -439,9 +501,7 @@ void LogExplorativeFusion(const std::string& explore_id, const GreedySearchFrame
                     << ", next_remaining_lookahead=" << next_frame.remaining_lookahead;
     LogFuserDebugLine(section2_header.str());
 
-    std::ostringstream section2_body;
-    section2_body << "explored_solution_object=" << FormatSolutionObjectForLog(evaluated_solution);
-    LogFuserDebugLine(section2_body.str());
+    LogSolutionArraysForLog("explored_solution", evaluated_solution);
 
     std::ostringstream pair_ops_line;
     pair_ops_line << "explored_pair_ops=[" << FormatIndexListForLog(candidate.producer_subgraph_ops)
@@ -462,6 +522,7 @@ void LogExplorativeFusion(const std::string& explore_id, const GreedySearchFrame
                   << ", explored_score=" << next_frame.current_cost
                   << ", delta_cost=" << selected_minus_parent_cost << ", improved=" << improved;
     LogFuserDebugLine(section3_line.str());
+    LogFuserDebugLine("");
 #else
     (void)explore_id;
     (void)parent_frame;
@@ -488,10 +549,7 @@ void LogSelectedSolution(const BestUpdateEvent& event,
            << ", selected_latency_cost=" << event.selected_latency;
     LogFuserDebugLine(header.str());
 
-    std::ostringstream selected_solution_line;
-    selected_solution_line << "selected_solution_object="
-                           << FormatSolutionObjectForLog(event.selected_solution);
-    LogFuserDebugLine(selected_solution_line.str());
+    LogSolutionArraysForLog("selected_solution", event.selected_solution);
 
     std::vector<const FrameCandidateEvaluationLog*> valid_logs;
     valid_logs.reserve(frame_candidate_logs.size());
@@ -527,6 +585,7 @@ void LogSelectedSolution(const BestUpdateEvent& event,
              << ", delta_vs_baseline=" << record.delta_vs_baseline;
         LogFuserDebugLine(line.str());
     }
+    LogFuserDebugLine("");
 #else
     (void)event;
     (void)frame_candidate_logs;
@@ -549,9 +608,10 @@ void LogFinalBestSelection(const SearchContext& context) {
     std::ostringstream line;
     line << std::setprecision(17);
     line << "[SEARCH_FINAL_BEST] has_best=1"
-         << ", final_latency_cost=" << context.best_cost
-         << ", final_best_solution_object=" << FormatSolutionObjectForLog(context.best_solution);
+         << ", final_latency_cost=" << context.best_cost;
     LogFuserDebugLine(line.str());
+    LogSolutionArraysForLog("final_best", context.best_solution);
+    LogFuserDebugLine("");
 #else
     (void)context;
 #endif
@@ -1431,8 +1491,7 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
         evaluated_candidates.reserve(ranked_candidates.size());
         std::vector<FrameCandidateEvaluationLog> frame_candidate_logs;
         frame_candidate_logs.reserve(ranked_candidates.size());
-        std::vector<BestUpdateEvent> best_update_events;
-        best_update_events.reserve(ranked_candidates.size());
+        std::optional<BestUpdateEvent> best_update_event;
 
         for (size_t ranked_idx = 0; ranked_idx < ranked_candidates.size(); ++ranked_idx) {
             const RankedGreedyCandidate& ranked = ranked_candidates[ranked_idx];
@@ -1473,13 +1532,13 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
             ++valid_evaluated;
             bool const best_updated = MaybeUpdateBest(context, evaluation);
             if (best_updated) {
-                best_update_events.push_back(BestUpdateEvent{
+                best_update_event = BestUpdateEvent{
                     .depth = frame.depth,
                     .frame_seq = current_frame_seq,
                     .explore_id = explore_id,
                     .selected_latency = evaluation.total_latency,
                     .selected_solution = evaluation.solution,
-                });
+                };
             }
             if (evaluation.total_latency < frame.current_cost) {
                 candidate_improved = true;
@@ -1532,8 +1591,8 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
         }
 
 #if MLSYS_ENABLE_FUSER_LOGGING
-        for (const BestUpdateEvent& event : best_update_events) {
-            LogSelectedSolution(event, frame_candidate_logs);
+        if (best_update_event.has_value()) {
+            LogSelectedSolution(best_update_event.value(), frame_candidate_logs);
         }
 #endif
 
