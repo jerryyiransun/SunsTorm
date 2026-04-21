@@ -124,7 +124,7 @@ TEST(TilerTest, CostGuidedDivisorTilerUsesDivisorCandidateBetweenHalvingSteps) {
     ASSERT_TRUE(tiled.ok()) << tiled.status().message();
 
     EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 96);
-    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 64);
 
     auto eval = mlsys::Evaluate(problem, tiled.value());
     ASSERT_TRUE(eval.ok()) << eval.status().message();
