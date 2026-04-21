@@ -31,4 +31,11 @@ class GreedyTiler : public Tiler {
     auto tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> override;
 };
 
+class CostGuidedDivisorTiler : public Tiler {
+  public:
+    auto tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> override;
+    auto tile_subgraph(const Problem& problem, const Solution& solution, size_t sg_idx)
+        -> StatusOr<Solution>;
+};
+
 } // namespace mlsys

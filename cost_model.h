@@ -51,6 +51,9 @@ class CostModel {
     // 2) total latency across subgraphs
     [[nodiscard]] auto estimate(const Solution& solution)
         -> StatusOr<std::tuple<Solution, SubgraphLatency>>;
+    [[nodiscard]] auto estimate_subgraph_latency(const Solution& solution, size_t sg_idx,
+                                                 const std::set<size_t>& prev_retained_tensors)
+        -> StatusOr<SubgraphLatency>;
     [[nodiscard]] auto cache_stats() const -> CacheStats;
 
   private:
@@ -60,20 +63,23 @@ class CostModel {
         Granularity granularity;
         std::optional<TraversalOrder> traversal_order;
         std::vector<size_t> prev_retained_tensors;
+        std::vector<std::vector<size_t>> suffix_ops;
+        std::vector<std::vector<size_t>> suffix_tensors_to_retain;
 
         bool operator==(const SubgraphCacheKey& other) const = default;
 
         template <typename H> friend auto AbslHashValue(H h, const SubgraphCacheKey& key) -> H {
             return H::combine(std::move(h), key.ops, key.tensors_to_retain, key.granularity.width,
                               key.granularity.height, key.granularity.depth, key.traversal_order,
-                              key.prev_retained_tensors);
+                              key.prev_retained_tensors, key.suffix_ops,
+                              key.suffix_tensors_to_retain);
         }
     };
 
     auto estimate_subgraph(const Solution& solution, size_t sg_idx,
                            const std::set<size_t>& prev_retained_tensors)
         -> StatusOr<SubgraphLatency>;
-    [[nodiscard]] auto build_subgraph_cache_key(const Subgraph& subgraph,
+    [[nodiscard]] auto build_subgraph_cache_key(const Solution& solution, size_t sg_idx,
                                                 const std::set<size_t>& prev_retained_tensors) const
         -> SubgraphCacheKey;
     [[nodiscard]] auto
