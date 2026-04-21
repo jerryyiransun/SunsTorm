@@ -318,6 +318,39 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
         }
         return required_size;
     };
+    auto ignored_tensor_reason = [&](size_t tensor_idx) {
+        std::string reason;
+        if (final_output_tensors.contains(tensor_idx)) {
+            reason += "final_output";
+        }
+        if (to_be_retained_tensors.contains(tensor_idx)) {
+            if (!reason.empty()) {
+                reason += ",";
+            }
+            reason += "retain_next";
+        }
+        if (prev_retained_tensors.contains(tensor_idx)) {
+            if (!reason.empty()) {
+                reason += ",";
+            }
+            reason += "retain_prev";
+        }
+        return reason;
+    };
+    auto emit_ignored_debug = [&](const std::string& site, size_t tensor_idx) {
+#ifdef DEBUG
+        if (emit_debug) {
+            bool const is_ephemeral_candidate = subgraph_produced.contains(tensor_idx);
+            std::cout
+                << "[DEBUG] " << site << " Tensor " << tensor_idx << " skipped by ignore-set ("
+                << ignored_tensor_reason(tensor_idx) << ")"
+                << (is_ephemeral_candidate
+                        ? "; ephemeral candidate, but memory path was pre-accounted by ignore-set"
+                        : "; not produced in this subgraph")
+                << " | total_mem=" << fast_memory_usage << "\n";
+        }
+#endif
+    };
 
     while (head < q.size()) {
         auto [curr_tensor_idx, curr_tensor_dim, is_final] = q[head++];
@@ -392,6 +425,8 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
                     queued_tensors.insert(lhs_tensor_idx);
                     q.emplace_back(lhs_tensor_idx, lhs_tensor, false);
                 }
+            } else {
+                emit_ignored_debug("MatMul LHS", lhs_tensor_idx);
             }
 
             Tensor rhs_tensor{
@@ -420,19 +455,43 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
                     queued_tensors.insert(rhs_tensor_idx);
                     q.emplace_back(rhs_tensor_idx, rhs_tensor, false);
                 }
+            } else {
+                emit_ignored_debug("MatMul RHS", rhs_tensor_idx);
             }
         } else if (op.op_type == "Pointwise") {
             if (op.inputs.size() == 1) {
                 size_t const in_tensor_idx = op.inputs[0];
                 bool const in_is_ignored = is_ignored_tensor_in_backward(in_tensor_idx);
-                if (!in_is_ignored && !queued_tensors.contains(in_tensor_idx)) {
-                    queued_tensors.insert(in_tensor_idx);
-                    q.emplace_back(in_tensor_idx, curr_tensor_dim, false);
+                if (!in_is_ignored) {
+                    bool const in_is_ephemeral = (subgraph_produced.contains(in_tensor_idx));
+                    bool const in_is_retained = (prev_retained_tensors.contains(in_tensor_idx));
+                    size_t const in_added_size = add_requirement_usage(
+                        in_tensor_idx, curr_tensor_dim, in_is_ephemeral, in_is_retained);
+#ifdef DEBUG
+                    if (emit_debug) {
+                        std::cout << "[DEBUG] Pointwise Unary Input Tensor " << in_tensor_idx
+                                  << (in_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes"
+                                      : in_is_retained
+                                          ? " is RETAINED! Takes 0 bytes"
+                                          : " takes " + std::to_string(in_added_size) +
+                                                " (req_w=" + std::to_string(curr_tensor_dim.width) +
+                                                " req_h=" + std::to_string(curr_tensor_dim.height) +
+                                                ")")
+                                  << " | total_mem=" << fast_memory_usage << "\n";
+                    }
+#endif
+                    if (!queued_tensors.contains(in_tensor_idx)) {
+                        queued_tensors.insert(in_tensor_idx);
+                        q.emplace_back(in_tensor_idx, curr_tensor_dim, false);
+                    }
+                } else {
+                    emit_ignored_debug("Pointwise Unary Input", in_tensor_idx);
                 }
             } else {
                 for (size_t const in_tensor_idx : op.inputs) {
                     bool const in_is_ignored = is_ignored_tensor_in_backward(in_tensor_idx);
                     if (in_is_ignored) {
+                        emit_ignored_debug("Pointwise Input", in_tensor_idx);
                         continue;
                     }
 

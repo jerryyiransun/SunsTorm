@@ -304,4 +304,66 @@ TEST(EvaluateTest, TraversalOrder_LengthMismatch_Fail) {
         << result.status().message();
 }
 
+TEST(EvaluateTest, UnaryPointwiseBoundaryInputCountsTowardCapacity) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 global input
+        {.width = 128, .height = 128}, // t1 output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+    };
+    // One 64x64 output tile (4096) plus one 64x64 boundary input tile (4096) = 8192.
+    // Before unary-pointwise boundary accounting fix, only output tile was counted and this passed.
+    problem.fast_memory_capacity = 6'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Fast Memory Capacity Exceeded]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, UnaryPointwiseEphemeralInputRemainsFreeInsideSubgraph) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 global input
+        {.width = 128, .height = 128}, // t1 intermediate
+        {.width = 128, .height = 128}, // t2 output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1}, // op0
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 1}, // op1
+    };
+    // Boundary input tile (t0) + final output tile (t2) = 8192.
+    // Ephemeral intermediate t1 should not add capacity.
+    problem.fast_memory_capacity = 9'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 1.0, 1e-9);
+}
+
 } // namespace
