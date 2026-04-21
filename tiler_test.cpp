@@ -95,6 +95,79 @@ TEST(TilerTest, GreedyTilerStillFindsValidTiling) {
     ASSERT_TRUE(eval.ok()) << eval.status().message();
 }
 
+TEST(TilerTest, CostGuidedDivisorTilerFindsValidTiling) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 512, .height = 512},
+        {.width = 512, .height = 512},
+        {.width = 512, .height = 512},
+    };
+    problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
+    problem.fast_memory_capacity = 60'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::CostGuidedDivisorTiler tiler;
+    auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, CostGuidedDivisorTilerUsesDivisorCandidateBetweenHalvingSteps) {
+    auto problem = MakeSinglePointwiseProblem(384, 128);
+    problem.fast_memory_capacity = 13'000;
+
+    mlsys::CostGuidedDivisorTiler tiler;
+    auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 96);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, CostGuidedDivisorTilerChoosesLowerLatencySplitKMove) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 256, .height = 128},
+        {.width = 128, .height = 256},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
+    problem.fast_memory_capacity = 50'000;
+    problem.slow_memory_bandwidth = 1'000'000'000;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::CostGuidedDivisorTiler tiler;
+    auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 128);
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, CostGuidedDivisorTilerPreservesSnakeTraversalOrder) {
+    auto problem = MakeSinglePointwiseProblem(384, 256);
+
+    mlsys::CostGuidedDivisorTiler tiler;
+    auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+    ASSERT_TRUE(tiled.value().subgraphs[0].traversal_order.has_value());
+    EXPECT_EQ(tiled.value().subgraphs[0].traversal_order.value(),
+              (mlsys::TraversalOrder{0, 1, 2, 5, 4, 3}));
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
 TEST(TilerTest, WidthDominantGridUsesHorizontalSnakeOrder) {
     auto problem = MakeSinglePointwiseProblem(384, 256);
     ExpectTraversalOrderForBothTilers(problem, mlsys::TraversalOrder{0, 1, 2, 5, 4, 3});

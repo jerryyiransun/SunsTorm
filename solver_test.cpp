@@ -1,55 +1,50 @@
-#include <vector>
-
 #include <gtest/gtest.h>
 
-#include "fuser.h"
 #include "mlsys.h"
 #include "solver.h"
 
 namespace {
 
-auto MakeProblemForGreedySolverTest() -> mlsys::Problem {
+auto MakeDivisorSensitivePointwiseProblem() -> mlsys::Problem {
     mlsys::Problem problem;
     problem.tensors = {
-        {.width = 256, .height = 256},
-        {.width = 256, .height = 256},
-        {.width = 256, .height = 256},
-        {.width = 256, .height = 256},
+        {.width = 384, .height = 128},
+        {.width = 384, .height = 128},
     };
-    problem.ops = {
-        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
-        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 100},
-        {.op_type = "Pointwise", .inputs = {1}, .outputs = {3}, .base_cost = 100},
-    };
-    problem.fast_memory_capacity = 35'000;
-    problem.slow_memory_bandwidth = 1;
+    problem.ops = {{.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100}};
+    problem.fast_memory_capacity = 13'000;
+    problem.slow_memory_bandwidth = 10;
     problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
     return problem;
 }
 
-TEST(SolverTest, GreedySolverMatchesGreedyFuserForSameConfig) {
-    mlsys::Problem problem = MakeProblemForGreedySolverTest();
-    mlsys::GreedyFuserConfig config{.search_depth = 2, .beam_width = 8};
+TEST(SolverTest, BaseSolverUsesCostGuidedDivisorTiler) {
+    auto problem = MakeDivisorSensitivePointwiseProblem();
 
-    mlsys::GreedyFuser fuser(config);
-    auto fused = fuser.fuse(problem);
-    ASSERT_TRUE(fused.ok()) << fused.status().message();
+    mlsys::BaseSolver solver;
+    auto solution = solver.solve(problem);
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    mlsys::GreedySolver solver(config);
-    auto solved = solver.solve(problem);
-    ASSERT_TRUE(solved.ok()) << solved.status().message();
+    ASSERT_EQ(solution.value().subgraphs.size(), 1);
+    EXPECT_EQ(solution.value().subgraphs[0].granularity.width, 96);
+    EXPECT_EQ(solution.value().subgraphs[0].granularity.height, 128);
 
-    EXPECT_EQ(*solved, *fused);
+    auto eval = mlsys::Evaluate(problem, solution.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
 }
 
-TEST(SolverTest, GreedySolverDefaultProducesEvaluatablePlan) {
-    mlsys::Problem problem = MakeProblemForGreedySolverTest();
+TEST(SolverTest, HeuristicSolverUsesCostGuidedDivisorTilerForIntervals) {
+    auto problem = MakeDivisorSensitivePointwiseProblem();
 
-    mlsys::GreedySolver solver;
-    auto solved = solver.solve(problem);
-    ASSERT_TRUE(solved.ok()) << solved.status().message();
+    mlsys::HeuristicSolver solver;
+    auto solution = solver.solve(problem);
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    auto eval = mlsys::Evaluate(problem, *solved);
+    ASSERT_EQ(solution.value().subgraphs.size(), 1);
+    EXPECT_EQ(solution.value().subgraphs[0].granularity.width, 96);
+    EXPECT_EQ(solution.value().subgraphs[0].granularity.height, 128);
+
+    auto eval = mlsys::Evaluate(problem, solution.value());
     ASSERT_TRUE(eval.ok()) << eval.status().message();
 }
 

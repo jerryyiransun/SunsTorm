@@ -79,7 +79,7 @@ auto BuildSingletonSolution(const Problem& problem) -> absl::StatusOr<Solution> 
         solution.subgraphs.push_back(sg);
     }
 
-    GreedyTiler tiler;
+    CostGuidedDivisorTiler tiler;
     auto tiled = tiler.tile(problem, solution);
     if (!tiled.ok()) {
         return tiled.status();
@@ -103,7 +103,7 @@ auto BaseSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
         solution.subgraphs.push_back(sg);
     }
 
-    unique_ptr<Tiler> tiler = make_unique<GreedyTiler>();
+    unique_ptr<Tiler> tiler = make_unique<CostGuidedDivisorTiler>();
     auto tiled_solution = tiler->tile(problem, solution);
     if (!tiled_solution.ok()) {
         return tiled_solution.status();
@@ -178,32 +178,31 @@ auto HeuristicSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> 
 
     std::vector<std::vector<IntervalPlan>> interval_plans(num_ops,
                                                           std::vector<IntervalPlan>(num_ops));
-    BruteForceTiler tiler;
+    CostGuidedDivisorTiler tiler;
 
     for (size_t start = 0; start < num_ops; ++start) {
         for (size_t end = start; end < num_ops && end < start + max_fusion_width; ++end) {
-            Solution local_solution;
             Subgraph fused_subgraph;
             fused_subgraph.tensors_to_retain = {};
             fused_subgraph.traversal_order = nullopt;
             for (size_t op_idx = start; op_idx <= end; ++op_idx) {
                 fused_subgraph.ops.push_back(op_idx);
             }
-            local_solution.subgraphs = {fused_subgraph};
-
-            auto tiled_local = tiler.tile(problem, local_solution);
-            if (!tiled_local.ok()) {
-                continue;
-            }
 
             Solution candidate_full;
             for (size_t prefix = 0; prefix < start; ++prefix) {
                 candidate_full.subgraphs.push_back(singleton_solution.subgraphs[prefix]);
             }
-            candidate_full.subgraphs.push_back(tiled_local.value().subgraphs[0]);
+            candidate_full.subgraphs.push_back(fused_subgraph);
             for (size_t suffix = end + 1; suffix < num_ops; ++suffix) {
                 candidate_full.subgraphs.push_back(singleton_solution.subgraphs[suffix]);
             }
+
+            auto tiled_candidate = tiler.tile_subgraph(problem, candidate_full, start);
+            if (!tiled_candidate.ok()) {
+                continue;
+            }
+            candidate_full = tiled_candidate.value();
 
             auto estimated = cost_model.estimate(candidate_full);
             if (!estimated.ok()) {
