@@ -541,6 +541,15 @@ auto SubgraphFitsFastMemory(const Problem& problem, const Solution& solution, si
                                       producer_op, false);
 }
 
+#ifdef DEBUG
+auto DebugSubgraphFitsFastMemory(const Problem& problem, const Solution& solution,
+                                 size_t subgraph_idx, const std::set<size_t>& prev_retained_tensors,
+                                 const std::vector<int>& producer_op) -> bool {
+    return SubgraphFitsFastMemoryImpl(problem, solution, subgraph_idx, prev_retained_tensors,
+                                      producer_op, true);
+}
+#endif
+
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {
 #ifdef DEBUG
     std::cout << "\n[DEBUG] Starting Evaluate Function\n";

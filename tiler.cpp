@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <functional>
+#ifdef DEBUG
+#include <iostream>
+#endif
 #include <limits>
 #include <optional>
 #include <set>
@@ -293,6 +296,39 @@ struct CostGuidedDivisorState {
     size_t depth_idx = 0;
 };
 
+#ifdef DEBUG
+template <typename T> void DebugPrintVector(const std::vector<T>& values) {
+    std::cout << "[";
+    for (size_t idx = 0; idx < values.size(); ++idx) {
+        if (idx > 0) {
+            std::cout << ", ";
+        }
+        std::cout << values[idx];
+    }
+    std::cout << "]";
+}
+
+void DebugPrintGranularity(const Granularity& granularity) {
+    std::cout << "{w=" << granularity.width << ", h=" << granularity.height
+              << ", k=" << granularity.depth << "}";
+}
+
+void DebugPrintState(const CostGuidedDivisorState& state, const Granularity& granularity) {
+    std::cout << "{idx_w=" << state.width_idx << ", idx_h=" << state.height_idx
+              << ", idx_k=" << state.depth_idx << ", granularity=";
+    DebugPrintGranularity(granularity);
+    std::cout << "}";
+}
+
+void DebugPrintOptionalCost(const std::optional<double>& cost) {
+    if (!cost.has_value()) {
+        std::cout << "unavailable";
+        return;
+    }
+    std::cout << cost.value();
+}
+#endif
+
 auto GranularityFromState(const std::vector<int64_t>& width_candidates,
                           const std::vector<int64_t>& height_candidates,
                           const std::vector<int64_t>& depth_candidates,
@@ -364,6 +400,12 @@ auto EstimateCandidateLatency(const Problem& problem, const Solution& solution, 
     auto latency =
         cost_model.estimate_subgraph_latency(candidate_solution, sg_idx, prev_retained_tensors);
     if (!latency.ok()) {
+#ifdef DEBUG
+        std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx
+                  << " candidate cost unavailable for ";
+        DebugPrintGranularity(granularity);
+        std::cout << ": " << latency.status().message() << "\n";
+#endif
         return std::nullopt;
     }
     return latency.value();
@@ -385,19 +427,70 @@ auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& soluti
                                                          MaxMatMulDepth(problem, subgraph))
                                      : std::vector<int64_t>{1};
 
+#ifdef DEBUG
+    std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " begin\n";
+    std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " ops=";
+    DebugPrintVector(subgraph.ops);
+    std::cout << ", output_shape={w=" << output_shape.width << ", h=" << output_shape.height
+              << "}, prev_retained=";
+    DebugPrintVector(
+        std::vector<size_t>(prev_retained_tensors.begin(), prev_retained_tensors.end()));
+    std::cout << "\n";
+    std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " width_candidates=";
+    DebugPrintVector(width_candidates);
+    std::cout << ", height_candidates=";
+    DebugPrintVector(height_candidates);
+    std::cout << ", depth_candidates=";
+    DebugPrintVector(depth_candidates);
+    std::cout << "\n";
+#endif
+
     CostGuidedDivisorState state;
+#ifdef DEBUG
+    int64_t step = 0;
+#endif
 
     while (true) {
         Granularity const current =
             GranularityFromState(width_candidates, height_candidates, depth_candidates, state);
         ApplyGranularityAndTraversal(problem, solution, sg_idx, current);
 
-        if (FitsFastMemory(problem, solution, sg_idx, prev_retained_tensors, producer_op)) {
+#ifdef DEBUG
+        std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                  << " current=";
+        DebugPrintState(state, current);
+        std::cout << "\n";
+#endif
+
+        bool const fits_fast_memory =
+#ifdef DEBUG
+            DebugSubgraphFitsFastMemory(problem, solution, sg_idx, prev_retained_tensors,
+                                        producer_op);
+#else
+            FitsFastMemory(problem, solution, sg_idx, prev_retained_tensors, producer_op);
+#endif
+#ifdef DEBUG
+        std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                  << " fits_fast_memory=" << (fits_fast_memory ? "true" : "false") << "\n";
+#endif
+
+        if (fits_fast_memory) {
             auto current_latency =
                 cost_model.estimate_subgraph_latency(solution, sg_idx, prev_retained_tensors);
             if (current_latency.ok()) {
+#ifdef DEBUG
+                std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step "
+                          << step << " accepted ";
+                DebugPrintGranularity(current);
+                std::cout << " with exact_cost=" << current_latency.value() << "\n";
+#endif
                 return absl::OkStatus();
             }
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " current cost unavailable despite fitting: "
+                      << current_latency.status().message() << "\n";
+#endif
         }
 
         std::optional<CostGuidedDivisorState> spatial_state =
@@ -420,16 +513,69 @@ auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& soluti
                                      *depth_state));
         }
 
+#ifdef DEBUG
+        std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                  << " next spatial=";
+        if (spatial_state.has_value()) {
+            DebugPrintState(*spatial_state,
+                            GranularityFromState(width_candidates, height_candidates,
+                                                 depth_candidates, *spatial_state));
+        } else {
+            std::cout << "none";
+        }
+        std::cout << ", spatial_cost=";
+        DebugPrintOptionalCost(spatial_latency);
+        std::cout << "; next depth=";
+        if (depth_state.has_value()) {
+            DebugPrintState(*depth_state, GranularityFromState(width_candidates, height_candidates,
+                                                               depth_candidates, *depth_state));
+        } else {
+            std::cout << "none";
+        }
+        std::cout << ", depth_cost=";
+        DebugPrintOptionalCost(depth_latency);
+        std::cout << "\n";
+#endif
+
         if (!spatial_latency.has_value() && !depth_latency.has_value()) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " terminating: no shrink candidate has an exact cost\n";
+#endif
             return absl::ResourceExhaustedError("Cannot fit working set even at minimum tile size");
         }
 
         if (depth_latency.has_value() &&
             (!spatial_latency.has_value() || depth_latency.value() < spatial_latency.value())) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " choose depth shrink because depth_cost=" << depth_latency.value();
+            if (spatial_latency.has_value()) {
+                std::cout << " < spatial_cost=" << spatial_latency.value();
+            } else {
+                std::cout << " and spatial_cost is unavailable";
+            }
+            std::cout << "\n";
+#endif
             state = *depth_state;
         } else {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " choose spatial shrink";
+            if (spatial_latency.has_value() && depth_latency.has_value()) {
+                std::cout << " because spatial_cost=" << spatial_latency.value()
+                          << " <= depth_cost=" << depth_latency.value();
+            } else if (spatial_latency.has_value()) {
+                std::cout << " because depth_cost is unavailable and spatial_cost="
+                          << spatial_latency.value();
+            }
+            std::cout << "\n";
+#endif
             state = *spatial_state;
         }
+#ifdef DEBUG
+        ++step;
+#endif
     }
 }
 

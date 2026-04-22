@@ -152,7 +152,7 @@ struct SearchContext {
     const Problem& problem;
     const std::vector<int>& producer_op;
     const TopologyInfo& topo;
-    GreedyTiler tiler;
+    CostGuidedDivisorTiler tiler;
     CostModel cost_model;
     std::unordered_map<std::string, std::vector<GreedyCandidate>> scored_candidates_cache;
     std::unordered_map<size_t, double> topk_hits_by_op;
@@ -1030,13 +1030,16 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
             auto existing = candidate_idx_by_key.find(key);
             if (existing == candidate_idx_by_key.end()) {
                 candidate_idx_by_key[key] = candidates.size();
-                candidates.push_back(GreedyCandidate {
-                    .type = type, .solution = std::move(solution),
-                    .potential_score = potential_score, .key = key,
+                candidates.push_back(GreedyCandidate{
+                    .type = type,
+                    .solution = std::move(solution),
+                    .potential_score = potential_score,
+                    .key = key,
                     .producer_subgraph_ops = producer_subgraph_ops,
                     .consumer_subgraph_ops = consumer_subgraph_ops,
 #if MLSYS_ENABLE_FUSER_LOGGING
-                    .producer_sg_idx = producer_sg_idx, .consumer_sg_idx = consumer_sg_idx,
+                    .producer_sg_idx = producer_sg_idx,
+                    .consumer_sg_idx = consumer_sg_idx,
                     .touched_tensors = touched_tensors,
 #endif
                 });
@@ -1164,13 +1167,16 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
             auto existing = candidate_idx_by_key.find(key);
             if (existing == candidate_idx_by_key.end()) {
                 candidate_idx_by_key[key] = candidates.size();
-                candidates.push_back(GreedyCandidate {
-                    .type = type, .solution = std::move(solution),
-                    .potential_score = potential_score, .key = key,
+                candidates.push_back(GreedyCandidate{
+                    .type = type,
+                    .solution = std::move(solution),
+                    .potential_score = potential_score,
+                    .key = key,
                     .producer_subgraph_ops = producer_subgraph_ops,
                     .consumer_subgraph_ops = consumer_subgraph_ops,
 #if MLSYS_ENABLE_FUSER_LOGGING
-                    .producer_sg_idx = producer_sg_idx, .consumer_sg_idx = consumer_sg_idx,
+                    .producer_sg_idx = producer_sg_idx,
+                    .consumer_sg_idx = consumer_sg_idx,
                     .touched_tensors = touched_tensors,
 #endif
                 });
@@ -1772,7 +1778,7 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
         .problem = problem,
         .producer_op = producer_op,
         .topo = topo,
-        .tiler = GreedyTiler(),
+        .tiler = CostGuidedDivisorTiler(),
         .cost_model = CostModel(problem),
     };
 
