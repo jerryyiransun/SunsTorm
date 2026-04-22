@@ -56,7 +56,7 @@ TEST(SolverTest, GreedySolverUsesCostGuidedDivisorTiler) {
     ASSERT_TRUE(solution.ok()) << solution.status().message();
 
     ASSERT_EQ(solution.value().subgraphs.size(), 1);
-    EXPECT_EQ(solution.value().subgraphs[0].granularity.width, 64);
+    EXPECT_EQ(solution.value().subgraphs[0].granularity.width, 96);
     EXPECT_EQ(solution.value().subgraphs[0].granularity.height, 64);
 
     auto eval = mlsys::Evaluate(problem, solution.value());

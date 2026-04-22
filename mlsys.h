@@ -99,6 +99,12 @@ auto SubgraphFitsFastMemory(const Problem& problem, const Solution& solution, si
                             const std::set<size_t>& prev_retained_tensors,
                             const std::vector<int>& producer_op) -> bool;
 
+#ifdef DEBUG
+auto DebugSubgraphFitsFastMemory(const Problem& problem, const Solution& solution,
+                                 size_t subgraph_idx, const std::set<size_t>& prev_retained_tensors,
+                                 const std::vector<int>& producer_op) -> bool;
+#endif
+
 absl::StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution);
 
 absl::Status WriteSolution(const Solution& solution, const std::string& filename);
