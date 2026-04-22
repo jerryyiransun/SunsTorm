@@ -83,19 +83,6 @@ auto DivisorCandidates(int64_t value, int64_t cap) -> std::vector<int64_t> {
     return candidates;
 }
 
-// Finds the largest MatMul reduction depth used by any op in a subgraph.
-auto MaxMatMulDepth(const Problem& problem, const Subgraph& subgraph) -> int64_t {
-    int64_t max_depth = 1;
-    for (size_t op_idx : subgraph.ops) {
-        if (problem.ops[op_idx].op_type != "MatMul") {
-            continue;
-        }
-        size_t lhs_idx = problem.ops[op_idx].inputs[0];
-        max_depth = std::max<int64_t>(max_depth, problem.tensors[lhs_idx].width);
-    }
-    return max_depth;
-}
-
 // Finds the split-k depth that can affect final MatMul outputs of a subgraph.
 auto FinalMatMulDepth(const Problem& problem, const Subgraph& subgraph) -> std::optional<int64_t> {
     std::set<size_t> consumed;
@@ -473,7 +460,7 @@ auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& soluti
     std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, subgraph);
     std::vector<int64_t> depth_candidates =
         final_matmul_depth.has_value()
-            ? DivisorCandidates(final_matmul_depth.value(), final_matmul_depth.value())
+            ? DivisorCandidates(final_matmul_depth.value(), problem.native_granularity.depth)
             : std::vector<int64_t>{1};
 
 #ifdef DEBUG
@@ -685,14 +672,12 @@ auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> 
         std::vector<int64_t> width_candidates = HalvingCandidates(problem.native_granularity.width);
         std::vector<int64_t> height_candidates =
             HalvingCandidates(problem.native_granularity.height);
-        std::vector<int64_t> depth_candidates = HalvingCandidates(MaxMatMulDepth(problem, sg));
-        bool has_matmul = false;
-        for (size_t op_idx : sg.ops) {
-            if (problem.ops[op_idx].op_type == "MatMul") {
-                has_matmul = true;
-                break;
-            }
-        }
+        std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, sg);
+        std::vector<int64_t> depth_candidates =
+            final_matmul_depth.has_value()
+                ? HalvingCandidates(
+                      std::min(final_matmul_depth.value(), problem.native_granularity.depth))
+                : std::vector<int64_t>{1};
 
         Granularity best_granularity{.width = 0, .height = 0, .depth = 0};
         double best_score = std::numeric_limits<double>::infinity();
@@ -701,10 +686,6 @@ auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> 
         for (int64_t width : width_candidates) {
             for (int64_t height : height_candidates) {
                 for (int64_t depth : depth_candidates) {
-                    if (depth != 1 && !has_matmul) {
-                        continue;
-                    }
-
                     sg.granularity = {.width = width, .height = height, .depth = depth};
                     if (!FitsFastMemory(problem, tiled_solution, sg_idx, prev_retained_tensors,
                                         producer_op)) {
@@ -753,7 +734,7 @@ auto GreedyTiler::tile(const Problem& problem, const Solution& solution) -> Stat
         std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, sg);
         std::vector<int64_t> depth_candidates =
             final_matmul_depth.has_value()
-                ? CandidateTileSizes(final_matmul_depth.value(), final_matmul_depth.value())
+                ? CandidateTileSizes(final_matmul_depth.value(), problem.native_granularity.depth)
                 : std::vector<int64_t>{1};
 
         CostGuidedDivisorState state;

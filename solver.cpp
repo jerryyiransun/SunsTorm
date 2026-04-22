@@ -51,28 +51,32 @@ auto MaxFusionWidthForProblem(size_t num_ops) -> size_t {
 
 auto GreedyConfigForProblem(size_t num_ops) -> GreedyFuserConfig {
     constexpr double kTopKFailurePenalty = 0.08;
-    if (num_ops <= 4) {
+    if (num_ops <= 5) {
         return GreedyFuserConfig{
-            .search_depth = 8, .beam_width = 32, .topk_failure_penalty = kTopKFailurePenalty};
+            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
     }
-    if (num_ops <= 8) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 24, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 16) {
+    if (num_ops <= 24) {
         return GreedyFuserConfig{
             .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
     }
     if (num_ops <= 32) {
         return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 12, .topk_failure_penalty = kTopKFailurePenalty};
+            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
     }
     if (num_ops <= 64) {
         return GreedyFuserConfig{
-            .search_depth = 2, .beam_width = 8, .topk_failure_penalty = kTopKFailurePenalty};
+            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
+    }
+    if (num_ops <= 128) {
+        return GreedyFuserConfig{
+            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
+    }
+    if (num_ops <= 256) {
+        return GreedyFuserConfig{
+            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
     }
     return GreedyFuserConfig{
-        .search_depth = 3, .beam_width = 6, .topk_failure_penalty = kTopKFailurePenalty};
+        .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
 }
 
 auto BuildSingletonSolution(const Problem& problem) -> absl::StatusOr<Solution> {
@@ -281,9 +285,8 @@ auto HeuristicSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> 
 }
 
 GreedySolver::GreedySolver()
-    : use_problem_sized_config_(true), config_{.search_depth = 0,
-                                               .beam_width = 0,
-                                               .topk_failure_penalty = 0.0} {}
+    : use_problem_sized_config_(true),
+      config_{.search_depth = 0, .beam_width = 0, .topk_failure_penalty = 0.0} {}
 
 GreedySolver::GreedySolver(std::string anytime_output_path) : GreedySolver() {
     anytime_output_path_ = std::move(anytime_output_path);

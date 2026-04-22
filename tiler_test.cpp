@@ -19,7 +19,7 @@ TEST(TilerTest, SingleMatMulCanBeTiledToFitFastMemory) {
     problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
     problem.fast_memory_capacity = 60'000;
     problem.slow_memory_bandwidth = 20;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Solution solution;
     mlsys::Subgraph sg;
@@ -51,7 +51,7 @@ TEST(TilerTest, Benchmark1BaselinePartitionHasValidTiling) {
     };
     problem.fast_memory_capacity = 60'000;
     problem.slow_memory_bandwidth = 20;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Solution solution;
     for (size_t op_idx = 0; op_idx < problem.ops.size(); ++op_idx) {
@@ -79,7 +79,7 @@ TEST(TilerTest, GreedyTilerStillFindsValidTiling) {
     problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
     problem.fast_memory_capacity = 60'000;
     problem.slow_memory_bandwidth = 20;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Solution solution;
     mlsys::Subgraph sg;
@@ -110,7 +110,7 @@ TEST(TilerTest, GreedyTilerUsesCeilCandidatesBetweenHalvingSteps) {
     ASSERT_TRUE(eval.ok()) << eval.status().message();
 }
 
-TEST(TilerTest, GreedyTilerWalksDepthCandidatesForSplitK) {
+TEST(TilerTest, GreedyTilerStartsDepthAtNativeForFinalMatMul) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 384, .height = 128},
@@ -118,9 +118,9 @@ TEST(TilerTest, GreedyTilerWalksDepthCandidatesForSplitK) {
         {.width = 128, .height = 128},
     };
     problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
-    problem.fast_memory_capacity = 50'000;
+    problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 20;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::GreedyTiler tiler;
     auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
@@ -129,6 +129,98 @@ TEST(TilerTest, GreedyTilerWalksDepthCandidatesForSplitK) {
     EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 128);
     EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
     EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 128);
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, BruteForceTilerStartsDepthAtNativeForFinalMatMul) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 384, .height = 128},
+        {.width = 128, .height = 384},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::BruteForceTiler tiler;
+    auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 128);
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, GreedyTilerKeepsDepthOneForPointwiseFinalOutput) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 384, .height = 128},
+        {.width = 128, .height = 384},
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    solution.subgraphs = {sg};
+
+    mlsys::GreedyTiler tiler;
+    auto tiled = tiler.tile(problem, solution);
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 1);
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, BruteForceTilerKeepsDepthOneForPointwiseFinalOutput) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 384, .height = 128},
+        {.width = 128, .height = 384},
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Solution solution;
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    solution.subgraphs = {sg};
+
+    mlsys::BruteForceTiler tiler;
+    auto tiled = tiler.tile(problem, solution);
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 1);
 
     auto eval = mlsys::Evaluate(problem, tiled.value());
     ASSERT_TRUE(eval.ok()) << eval.status().message();
@@ -144,7 +236,7 @@ TEST(TilerTest, CostGuidedDivisorTilerFindsValidTiling) {
     problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
     problem.fast_memory_capacity = 60'000;
     problem.slow_memory_bandwidth = 20;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::CostGuidedDivisorTiler tiler;
     auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
@@ -179,7 +271,7 @@ TEST(TilerTest, CostGuidedDivisorTilerChoosesLowerLatencySplitKMove) {
     problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
     problem.fast_memory_capacity = 50'000;
     problem.slow_memory_bandwidth = 1'000'000'000;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::CostGuidedDivisorTiler tiler;
     auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());

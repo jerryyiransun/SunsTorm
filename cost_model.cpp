@@ -890,9 +890,10 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
     }
 
     if (subgraph.granularity.width > problem_.native_granularity.width ||
-        subgraph.granularity.height > problem_.native_granularity.height) {
+        subgraph.granularity.height > problem_.native_granularity.height ||
+        subgraph.granularity.depth > problem_.native_granularity.depth) {
         return absl::InvalidArgumentError(
-            "CostModel: subgraph granularity width/height cannot exceed native granularity");
+            "CostModel: subgraph granularity width/height/depth cannot exceed native granularity");
     }
 
     // Classify tensor roles for this subgraph.

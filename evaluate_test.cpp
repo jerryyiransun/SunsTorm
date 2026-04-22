@@ -83,7 +83,7 @@ TEST(EvaluateTest, RetainedLoadedInput_CountsTowardCapacity) {
     problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1000}};
     problem.fast_memory_capacity = 10'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Solution solution;
     mlsys::Subgraph sg;
@@ -120,7 +120,7 @@ TEST(EvaluateTest, RetainedEphemeralTensor_CountsTowardNextSubgraphCapacity) {
     //   retained t1 full 16384 + rhs strip 4096 + output tile 4096 = 24576 (exceeds).
     problem.fast_memory_capacity = 22'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Solution solution;
 
@@ -159,7 +159,7 @@ TEST(EvaluateTest, PartialSameTensorStripsCountIndependentlyForCapacity) {
     // For one 64x64 tile: output 4096 + lhs strip 8192 + rhs strip 8192 = 20480.
     problem.fast_memory_capacity = 15'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -195,7 +195,7 @@ TEST(EvaluateTest, DuplicateFullBoundaryInputsAreDedupedForCapacity) {
     // total = 81920 (passes under 90000).
     problem.fast_memory_capacity = 90'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -232,7 +232,7 @@ TEST(EvaluateTest, FullSharedInputSuppressesPartialForCapacity) {
     // - clarified behavior (full t0 suppresses partial t0): 73728 (pass)
     problem.fast_memory_capacity = 78'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1, 2};
@@ -266,7 +266,7 @@ TEST(EvaluateTest, PartialThenFullSharedInputStillCountsOnlyFullForCapacity) {
     // - expected behavior (full dominates): 40960 (pass)
     problem.fast_memory_capacity = 45'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -309,7 +309,7 @@ TEST(EvaluateTest, DistinctPartialSpecsOnSameTensorAreDuplicatedForCapacity) {
     // If incorrectly deduped to one t0 partial, total would be 57344 (would pass).
     problem.fast_memory_capacity = 60'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -344,7 +344,7 @@ TEST(EvaluateTest, RetainedFullTensorSuppressesLaterPartialRequirement) {
     // If retained full did not suppress partial t1, this would be 49152 (fail).
     problem.fast_memory_capacity = 45'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg0;
     sg0.ops = {0};
@@ -376,7 +376,7 @@ TEST(EvaluateTest, RetainedTensor_OutOfRange_Fail) {
     problem.ops = {{.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100}};
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Solution solution;
     mlsys::Subgraph sg;
@@ -403,7 +403,7 @@ TEST(EvaluateTest, TraversalOrder_LengthMismatch_Fail) {
     problem.ops = {{.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100}};
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Solution solution;
     mlsys::Subgraph sg;
@@ -434,7 +434,7 @@ TEST(EvaluateTest, UnaryPointwiseBoundaryInputCountsTowardCapacity) {
     // Before unary-pointwise boundary accounting fix, only output tile was counted and this passed.
     problem.fast_memory_capacity = 6'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -467,7 +467,7 @@ TEST(EvaluateTest, UnaryPointwiseEphemeralInputRemainsFreeInsideSubgraph) {
     // Ephemeral intermediate t1 should not add capacity.
     problem.fast_memory_capacity = 9'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -497,7 +497,7 @@ TEST(EvaluateTest, MultipleFinalOutputsDifferentDimensions_Fail) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -530,7 +530,7 @@ TEST(EvaluateTest, MultipleFinalOutputsDifferentOpTypes_Fail) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -559,7 +559,7 @@ TEST(EvaluateTest, PointwiseFinalOutputWithNonUnitK_Fail) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -597,7 +597,7 @@ TEST(EvaluateTest, FusedMatMulChainMiddleTensorIsEphemeralForCapacity) {
     // If t2 were charged as non-ephemeral, total would be 20480 (fails).
     problem.fast_memory_capacity = 18'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 64};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};

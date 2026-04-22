@@ -1,4 +1,5 @@
 #include <memory>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -35,7 +36,7 @@ TEST(CostModelTest, DuplicateFullBoundaryInputTilesAreNotDoubleCounted) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -71,7 +72,7 @@ TEST(CostModelTest, FullSharedInputSuppressesPartialRead) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -110,7 +111,7 @@ TEST(CostModelTest, PartialThenFullSharedInputStillChargesSingleFullRead) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -150,7 +151,7 @@ TEST(CostModelTest, DistinctPartialSpecsOnSameTensorAreDuplicated) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -188,7 +189,7 @@ TEST(CostModelTest, RetainedFullTensorSuppressesLaterPartialRead) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg0;
     sg0.ops = {0};
@@ -232,7 +233,7 @@ TEST(CostModelTest, SingleMatMulSameTensorInputsCountStripsIndependently) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -276,7 +277,7 @@ TEST(CostModelTest, DuplicateInternalProducerTilesDoNotDoubleCountCompute) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1, 2};
@@ -313,7 +314,7 @@ TEST(CostModelTest, DuplicateInternalProducerTilesDoNotDoubleCountCompute_WhenCo
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 1'000'000'000'000;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1, 2};
@@ -387,7 +388,7 @@ TEST(CostModelTest, SmallTileBelowNativeKeepsFullComputePerStep) {
     problem.ops = {{.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1000}};
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 1'000'000'000;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -416,7 +417,7 @@ TEST(CostModelTest, SplitKNonDivisibleScalesFinalChunkCompute) {
     problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1000}};
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 1'000'000'000;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -446,7 +447,7 @@ TEST(CostModelTest, SplitKRetainedGraphOutputStillWritesOnlyFinalKStep) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg_no_retain;
     sg_no_retain.ops = {0};
@@ -490,7 +491,7 @@ TEST(CostModelTest, EphemeralIntermediateHasNoSlowMemoryTransferCost) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0, 1};
@@ -523,7 +524,7 @@ TEST(CostModelTest, RetainingEphemeralTensorCarriesToNextSubgraph) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg0_no_retain;
     sg0_no_retain.ops = {0, 1};
@@ -577,7 +578,7 @@ TEST(CostModelTest, RetainedBoundaryTensorRemovesReload) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg0;
     sg0.ops = {0};
@@ -625,7 +626,7 @@ TEST(CostModelTest, TensorConsumedInsideSameSubgraphDoesNotForceWriteback) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100; // Memory-bound to expose writeback accounting.
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg0;
     sg0.ops = {0, 1};
@@ -666,7 +667,7 @@ TEST(CostModelTest, RetainedPureOutputInFinalSubgraphStillWritesBack) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100; // Memory-bound to expose writeback accounting.
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -701,7 +702,7 @@ TEST(CostModelTest, RetainedPureOutputInNonFinalSubgraphStillWritesBack) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg0;
     sg0.ops = {0};
@@ -741,7 +742,7 @@ TEST(CostModelTest, CacheHitIsFetched_StatsIncrease) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -783,7 +784,7 @@ TEST(CostModelTest, CacheStatsDisabled_DefaultNoTracking) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 100;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -818,7 +819,7 @@ TEST(CostModelTest, RasterTraversalReuseIsEnabledByDefault) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::Subgraph sg;
     sg.ops = {0};
@@ -836,6 +837,37 @@ TEST(CostModelTest, RasterTraversalReuseIsEnabledByDefault) {
 
     EXPECT_NEAR(std::get<1>(estimated.value()), 7096.0, 1e-6);
     EXPECT_LT(std::get<1>(estimated.value()), 8192.0);
+}
+
+TEST(CostModelTest, RejectsGranularityDepthAboveNative) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 256, .height = 128},
+        {.width = 128, .height = 256},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1500},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 256};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+
+    ASSERT_FALSE(estimated.ok());
+    EXPECT_NE(std::string(estimated.status().message()).find("native granularity"),
+              std::string::npos);
 }
 
 } // namespace

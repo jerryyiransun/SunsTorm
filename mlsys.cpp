@@ -164,7 +164,8 @@ auto ReadProblem(const std::string& filename) -> StatusOr<Problem> {
         if (gran.size() >= 2) {
             problem.native_granularity.width = gran[0].get<Width>();
             problem.native_granularity.height = gran[1].get<Height>();
-            problem.native_granularity.depth = 1;
+            problem.native_granularity.depth =
+                gran.size() >= 3 ? gran[2].get<Depth>() : gran[0].get<Depth>();
         } else {
             return absl::InvalidArgumentError("native_granularity must have at least 2 elements");
         }

@@ -52,7 +52,7 @@ inline auto MakeSinglePointwiseProblem(int64_t width, int64_t height) -> mlsys::
     problem.ops = {{.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 100}};
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
     return problem;
 }
 

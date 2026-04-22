@@ -3,7 +3,7 @@ set -euo pipefail
 
 BENCHMARK_NUM="${1:?Usage: $0 <benchmark-number> <timeout-seconds> [output-json]}"
 TIMEOUT_SECONDS="${2:?Usage: $0 <benchmark-number> <timeout-seconds> [output-json]}"
-OUTPUT_JSON="${3:-output.json}"
+OUTPUT_JSON="${3:-out.json}"
 
 BENCHMARK_JSON="benchmarks/mlsys-2026-${BENCHMARK_NUM}.json"
 

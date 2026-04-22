@@ -88,7 +88,7 @@ TEST(FuserTest, EnumeratesRecomputedBranchProducerAcrossSubgraphs) {
     };
     problem.fast_memory_capacity = 35'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::BruteForceFuser fuser;
     auto solutions = fuser.fuse(problem);
@@ -124,7 +124,7 @@ TEST(FuserTest, GreedyAvoidsDiamondRecomputationSchedule) {
     };
     problem.fast_memory_capacity = 35'000;
     problem.slow_memory_bandwidth = 1;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(2, 8));
     auto solution = fuser.fuse(problem);
@@ -148,7 +148,7 @@ TEST(FuserTest, PrefuseFusesThroughUnaryChainThenStopsAtMultiInputConsumer) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
     auto solution = fuser.fuse(problem);
@@ -174,7 +174,7 @@ TEST(FuserTest, PrefuseDoesNotTreatMultiInputPointwiseConsumerAsFree) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
     auto solution = fuser.fuse(problem);
@@ -201,7 +201,7 @@ TEST(FuserTest, PrefuseSkipsDirectMergeWhenProducerOutputHasAnotherConsumer) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
     auto solution = fuser.fuse(problem);
@@ -228,7 +228,7 @@ TEST(FuserTest, PrefuseDoesNotHardFuseIntoMatMulConsumer) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 32, .height = 32, .depth = 1};
+    problem.native_granularity = {.width = 32, .height = 32, .depth = 32};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
     auto solution = fuser.fuse(problem);
@@ -254,7 +254,7 @@ TEST(FuserTest, PrefuseFusesMatMulProducerIntoUnaryPointwiseConsumer) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 32, .height = 32, .depth = 1};
+    problem.native_granularity = {.width = 32, .height = 32, .depth = 32};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
     auto solution = fuser.fuse(problem);
@@ -279,7 +279,7 @@ TEST(FuserTest, DirectMergeRemovesProducerSubgraphWhenSafe) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(1, 8));
     auto solution = fuser.fuse(problem);
@@ -303,7 +303,7 @@ TEST(FuserTest, AvoidsInvalidDestructiveMergeWhenProducerIsStillNeeded) {
     };
     problem.fast_memory_capacity = 8'000;
     problem.slow_memory_bandwidth = 1;
-    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 64};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(1, 8));
     auto solution = fuser.fuse(problem);
@@ -353,7 +353,7 @@ TEST(FuserTest, RetainCarriesTensorAcrossUnrelatedIntermediateSubgraph) {
     };
     problem.fast_memory_capacity = 100'000;
     problem.slow_memory_bandwidth = 1;
-    problem.native_granularity = {.width = 64, .height = 64, .depth = 1};
+    problem.native_granularity = {.width = 64, .height = 64, .depth = 64};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(1, 8));
     auto solution = fuser.fuse(problem);
@@ -393,7 +393,7 @@ TEST(FuserTest, UsesExplicitTopologicalOrderForGeneratedSolution) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
     auto solution = fuser.fuse(problem);
@@ -419,7 +419,7 @@ TEST(FuserTest, BeamWidthOneAvoidsRecomputationSchedule) {
     };
     problem.fast_memory_capacity = 35'000;
     problem.slow_memory_bandwidth = 1;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(2, 1));
     auto solution = fuser.fuse(problem);
@@ -449,7 +449,7 @@ TEST(FuserTest, BeamWidthOnePrioritizesHigherScoredFuseCandidate) {
     };
     problem.fast_memory_capacity = 1'000'000;
     problem.slow_memory_bandwidth = 10;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
 
     mlsys::GreedyFuser fuser(MakeGreedyConfig(1, 1));
     auto solution = fuser.fuse(problem);
