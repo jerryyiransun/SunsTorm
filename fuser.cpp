@@ -8,6 +8,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <set>
@@ -152,7 +153,7 @@ struct SearchContext {
     const Problem& problem;
     const std::vector<int>& producer_op;
     const TopologyInfo& topo;
-    CostGuidedDivisorTiler tiler;
+    Tiler* tiler;
     CostModel cost_model;
     std::unordered_map<std::string, std::vector<GreedyCandidate>> scored_candidates_cache;
     std::unordered_map<size_t, double> topk_hits_by_op;
@@ -1030,16 +1031,13 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
             auto existing = candidate_idx_by_key.find(key);
             if (existing == candidate_idx_by_key.end()) {
                 candidate_idx_by_key[key] = candidates.size();
-                candidates.push_back(GreedyCandidate{
-                    .type = type,
-                    .solution = std::move(solution),
-                    .potential_score = potential_score,
-                    .key = key,
+                candidates.push_back(GreedyCandidate {
+                    .type = type, .solution = std::move(solution),
+                    .potential_score = potential_score, .key = key,
                     .producer_subgraph_ops = producer_subgraph_ops,
                     .consumer_subgraph_ops = consumer_subgraph_ops,
 #if MLSYS_ENABLE_FUSER_LOGGING
-                    .producer_sg_idx = producer_sg_idx,
-                    .consumer_sg_idx = consumer_sg_idx,
+                    .producer_sg_idx = producer_sg_idx, .consumer_sg_idx = consumer_sg_idx,
                     .touched_tensors = touched_tensors,
 #endif
                 });
@@ -1167,16 +1165,13 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
             auto existing = candidate_idx_by_key.find(key);
             if (existing == candidate_idx_by_key.end()) {
                 candidate_idx_by_key[key] = candidates.size();
-                candidates.push_back(GreedyCandidate{
-                    .type = type,
-                    .solution = std::move(solution),
-                    .potential_score = potential_score,
-                    .key = key,
+                candidates.push_back(GreedyCandidate {
+                    .type = type, .solution = std::move(solution),
+                    .potential_score = potential_score, .key = key,
                     .producer_subgraph_ops = producer_subgraph_ops,
                     .consumer_subgraph_ops = consumer_subgraph_ops,
 #if MLSYS_ENABLE_FUSER_LOGGING
-                    .producer_sg_idx = producer_sg_idx,
-                    .consumer_sg_idx = consumer_sg_idx,
+                    .producer_sg_idx = producer_sg_idx, .consumer_sg_idx = consumer_sg_idx,
                     .touched_tensors = touched_tensors,
 #endif
                 });
@@ -1297,7 +1292,7 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
 auto EvaluateCandidateState(SearchContext& context, const GreedyCandidate& candidate)
     -> ExactEvaluation {
     ExactEvaluation evaluation;
-    auto tiled = context.tiler.tile(context.problem, candidate.solution);
+    auto tiled = context.tiler->tile(context.problem, candidate.solution);
     if (!tiled.ok()) {
         return evaluation;
     }
@@ -1745,7 +1740,13 @@ void EnumerateSchedules(const Problem& problem, const std::vector<int>& producer
 
 } // namespace
 
-GreedyFuser::GreedyFuser(GreedyFuserConfig config) : config_(config) {}
+GreedyFuser::GreedyFuser(GreedyFuserConfig config)
+    : GreedyFuser(config, std::make_unique<CostGuidedDivisorTiler>()) {}
+
+GreedyFuser::GreedyFuser(GreedyFuserConfig config, std::unique_ptr<Tiler> tiler)
+    : config_(config), tiler_(std::move(tiler)) {}
+
+GreedyFuser::~GreedyFuser() = default;
 
 auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
     if (config_.search_depth < 0) {
@@ -1756,6 +1757,9 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
     }
     if (config_.topk_failure_penalty < 0.0) {
         return absl::InvalidArgumentError("topk_failure_penalty must be non-negative");
+    }
+    if (tiler_ == nullptr) {
+        return absl::InvalidArgumentError("tiler must not be null");
     }
     if (problem.ops.empty()) {
         return Solution{};
@@ -1778,7 +1782,7 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
         .problem = problem,
         .producer_op = producer_op,
         .topo = topo,
-        .tiler = CostGuidedDivisorTiler(),
+        .tiler = tiler_.get(),
         .cost_model = CostModel(problem),
     };
 
