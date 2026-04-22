@@ -512,21 +512,49 @@ auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& soluti
             NextSpatialState(width_candidates, height_candidates, depth_candidates, state);
         std::optional<CostGuidedDivisorState> depth_state = NextDepthState(depth_candidates, state);
 
-        std::optional<double> spatial_latency;
-        if (spatial_state.has_value()) {
-            spatial_latency = EstimateCandidateLatency(
-                problem, solution, sg_idx, prev_retained_tensors, cost_model,
-                GranularityFromState(width_candidates, height_candidates, depth_candidates,
-                                     *spatial_state));
+        if (!spatial_state.has_value() && !depth_state.has_value()) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " terminating: no shrink candidate remains\n";
+#endif
+            return absl::ResourceExhaustedError("Cannot fit working set even at minimum tile size");
         }
 
-        std::optional<double> depth_latency;
-        if (depth_state.has_value()) {
-            depth_latency = EstimateCandidateLatency(
-                problem, solution, sg_idx, prev_retained_tensors, cost_model,
-                GranularityFromState(width_candidates, height_candidates, depth_candidates,
-                                     *depth_state));
+        if (spatial_state.has_value() && !depth_state.has_value()) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " choose spatial shrink because it is the only remaining move\n";
+#endif
+            state = *spatial_state;
+#ifdef DEBUG
+            ++step;
+#endif
+            continue;
         }
+
+        if (!spatial_state.has_value() && depth_state.has_value()) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " choose depth shrink because it is the only remaining move\n";
+#endif
+            state = *depth_state;
+#ifdef DEBUG
+            ++step;
+#endif
+            continue;
+        }
+
+        std::optional<double> spatial_latency;
+        spatial_latency = EstimateCandidateLatency(
+            problem, solution, sg_idx, prev_retained_tensors, cost_model,
+            GranularityFromState(width_candidates, height_candidates, depth_candidates,
+                                 *spatial_state));
+
+        std::optional<double> depth_latency;
+        depth_latency = EstimateCandidateLatency(
+            problem, solution, sg_idx, prev_retained_tensors, cost_model,
+            GranularityFromState(width_candidates, height_candidates, depth_candidates,
+                                 *depth_state));
 
 #ifdef DEBUG
         std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
