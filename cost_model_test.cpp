@@ -57,11 +57,7 @@ TEST(CostModelTest, DuplicateFullBoundaryInputTilesAreNotDoubleCounted) {
     EXPECT_NEAR(std::get<1>(estimated.value()), 491.52, 1e-6);
 }
 
-TEST(CostModelTest, FullAndPartialSharedInputTilesAreBothCounted) {
-    GTEST_SKIP()
-        << "FIXME: Spec ambiguity. If a full tensor is resident/fetched in-step, it may suppress "
-           "partial reloads for that tensor. Awaiting organizer clarification.";
-
+TEST(CostModelTest, FullSharedInputSuppressesPartialRead) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 128, .height = 128}, // t0 shared input
@@ -90,16 +86,139 @@ TEST(CostModelTest, FullAndPartialSharedInputTilesAreBothCounted) {
     auto estimated = cost_model.estimate(solution);
     ASSERT_TRUE(estimated.ok()) << estimated.status().message();
 
-    // Shared boundary input t0 is required as:
-    // - full 128x128 tile by op0 (pointwise input) (16384)
-    // - half-height 128x64 strip by op1 LHS (8192)
-    // Full fetch is deduped only against other full fetches, so full+strip are both counted.
+    // Shared boundary input t0 is required as full and partial in the same step.
+    // Full fetch takes canonical residency, so the partial request is a hit.
     //
-    // Reads: t0(full+strip)=24576, t2=16384
+    // Reads: t0(full)=16384, t2=16384
     // Writes: t1=16384, t3=8192
-    // Total memory time: (24576 + 16384 + 16384 + 8192) / 100 = 655.36
-    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 655.36, 1e-6);
-    EXPECT_NEAR(std::get<1>(estimated.value()), 655.36, 1e-6);
+    // Total memory time: (16384 + 16384 + 16384 + 8192) / 100 = 573.44
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 573.44, 1e-6);
+    EXPECT_NEAR(std::get<1>(estimated.value()), 573.44, 1e-6);
+}
+
+TEST(CostModelTest, PartialThenFullSharedInputStillChargesSingleFullRead) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 shared boundary input
+        {.width = 128, .height = 128}, // t1 rhs of first matmul
+        {.width = 128, .height = 128}, // t2 intermediate output (linked matmuls)
+        {.width = 128, .height = 128}, // t3 final output
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1}, // op0
+        {.op_type = "MatMul", .inputs = {2, 0}, .outputs = {3}, .base_cost = 1}, // op1
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 64};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+    ASSERT_TRUE(estimated.ok()) << estimated.status().message();
+
+    // depth=64 with K=128 => split-k runs 2 k-steps.
+    // In step1 backprop, t0 is discovered first as partial (op1 rhs), then as full (op0 lhs).
+    // Expected charging is one full t0 for the step.
+    // Step1 reads: t0(full)=16384, t1(partial)=8192. (no write, intermediate split-k step)
+    // Step2 reads: t1(partial next k-slice)=8192; writes t3(full)=16384.
+    // Total memory time: (24576 + 24576) / 100 = 491.52.
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 491.52, 1e-6);
+    EXPECT_NEAR(std::get<1>(estimated.value()), 491.52, 1e-6);
+}
+
+TEST(CostModelTest, DistinctPartialSpecsOnSameTensorAreDuplicated) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 shared tensor with two different partial specs
+        {.width = 128, .height = 128}, // t1 rhs of op0
+        {.width = 128, .height = 128}, // t2 lhs of op1
+        {.width = 128, .height = 128}, // t3 output of op0
+        {.width = 128, .height = 128}, // t4 output of op1
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {3}, .base_cost = 1}, // t0 lhs partial
+        {.op_type = "MatMul", .inputs = {2, 0}, .outputs = {4}, .base_cost = 1}, // t0 rhs partial
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 64};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+    ASSERT_TRUE(estimated.ok()) << estimated.status().message();
+
+    // depth=64 with K=128 => 2 split-k steps.
+    // Each step reads four partials (t0 lhs + t0 rhs + t1 + t2) = 32768.
+    // Distinct t0 partial specs are both charged in each step (no partial-partial reuse).
+    // Final step writes t3+t4 full = 32768.
+    // Total memory time: (32768 + 32768 + 32768) / 100 = 983.04
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 983.04, 1e-6);
+    EXPECT_NEAR(std::get<1>(estimated.value()), 983.04, 1e-6);
+}
+
+TEST(CostModelTest, RetainedFullTensorSuppressesLaterPartialRead) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 input to sg0
+        {.width = 128, .height = 128}, // t1 produced in sg0, retained full
+        {.width = 128, .height = 128}, // t2 rhs input to sg1 matmul
+        {.width = 128, .height = 128}, // t3 output of sg1
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1}, // sg0 op
+        {.op_type = "MatMul", .inputs = {1, 2}, .outputs = {3}, .base_cost = 1}, // sg1 op
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg0;
+    sg0.ops = {0};
+    sg0.tensors_to_retain = {1};
+    sg0.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg0.traversal_order = std::nullopt;
+    sg0.subgraph_latency = 0.0;
+
+    mlsys::Subgraph sg1;
+    sg1.ops = {1};
+    sg1.tensors_to_retain = {};
+    sg1.granularity = {.width = 128, .height = 128, .depth = 64};
+    sg1.traversal_order = std::nullopt;
+    sg1.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg0, sg1}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+    ASSERT_TRUE(estimated.ok()) << estimated.status().message();
+
+    // sg0: read t0 full only => 16384 / 100 = 163.84
+    // sg1 split-k:
+    // - step1 read t2 partial 8192 (t1 partial covered by retained full t1), no write
+    // - step2 read t2 partial 8192, write t3 full 16384
+    // sg1 total = 32768 / 100 = 327.68
+    // total = 163.84 + 327.68 = 491.52
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 163.84, 1e-6);
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[1].subgraph_latency, 327.68, 1e-6);
+    EXPECT_NEAR(std::get<1>(estimated.value()), 491.52, 1e-6);
 }
 
 TEST(CostModelTest, SingleMatMulSameTensorInputsCountStripsIndependently) {

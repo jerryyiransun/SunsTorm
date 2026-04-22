@@ -211,11 +211,7 @@ TEST(EvaluateTest, DuplicateFullBoundaryInputsAreDedupedForCapacity) {
     EXPECT_NEAR(result.value(), 1.0, 1e-9);
 }
 
-TEST(EvaluateTest, FullAndPartialSharedInputTilesAreBothCounted) {
-    GTEST_SKIP()
-        << "FIXME: Spec ambiguity. If a full tensor is resident/fetched in-step, it may suppress "
-           "partial reloads for that tensor. Awaiting organizer clarification.";
-
+TEST(EvaluateTest, FullSharedInputSuppressesPartialForCapacity) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 128, .height = 128}, // t0 shared input (full + partial requirements)
@@ -228,9 +224,9 @@ TEST(EvaluateTest, FullAndPartialSharedInputTilesAreBothCounted) {
         {.op_type = "Pointwise", .inputs = {0, 4}, .outputs = {1}, .base_cost = 1}, // op0
         {.op_type = "MatMul", .inputs = {0, 2}, .outputs = {3}, .base_cost = 1},    // op1
     };
-    // This threshold separates interpretations:
-    // - count full+partial for shared t0: usage 81920 (fail)
-    // - suppress partial when full already resident: usage 73728 (pass)
+    // Threshold separating old vs clarified behavior:
+    // - old behavior (full+partial both charged for t0): 81920 (fail)
+    // - clarified behavior (full t0 suppresses partial t0): 73728 (pass)
     problem.fast_memory_capacity = 78'000;
     problem.slow_memory_bandwidth = 10;
     problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
@@ -244,12 +240,128 @@ TEST(EvaluateTest, FullAndPartialSharedInputTilesAreBothCounted) {
 
     mlsys::Solution solution{.subgraphs = {sg}};
 
-    // Enable once organizer confirms whether full residency suppresses partial requirement.
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 1.0, 1e-9);
+}
+
+TEST(EvaluateTest, PartialThenFullSharedInputStillCountsOnlyFullForCapacity) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 shared boundary input
+        {.width = 128, .height = 128}, // t1 rhs input of first matmul
+        {.width = 128, .height = 128}, // t2 intermediate output (linked matmuls)
+        {.width = 128, .height = 128}, // t3 final output
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1}, // op0
+        {.op_type = "MatMul", .inputs = {2, 0}, .outputs = {3}, .base_cost = 1}, // op1
+    };
+    // Backprop from final op1 first sees t0 as partial (split-k rhs strip), then via op0
+    // sees t0 as full (intermediate-path lhs).
+    // - old behavior (partial + full both charged for t0): 49152 (fail)
+    // - expected behavior (full dominates): 40960 (pass)
+    problem.fast_memory_capacity = 45'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 64};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 1.0, 1e-9);
+}
+
+TEST(EvaluateTest, DistinctPartialSpecsOnSameTensorAreDuplicatedForCapacity) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 shared tensor with two different partial specs
+        {.width = 128, .height = 128}, // t1 rhs of op0
+        {.width = 128, .height = 128}, // t2 lhs of op1
+        {.width = 128, .height = 128}, // t3 output of op0
+        {.width = 128, .height = 128}, // t4 output of op1
+    };
+    problem.ops = {
+        {.op_type = "MatMul",
+         .inputs = {0, 1},
+         .outputs = {3},
+         .base_cost = 1}, // t0 as lhs partial
+        {.op_type = "MatMul",
+         .inputs = {2, 0},
+         .outputs = {4},
+         .base_cost = 1}, // t0 as rhs partial
+    };
+    // Distinct partial specs of t0 should both be charged:
+    // outputs t3+t4: 32768
+    // t1+t2 partials: 8192+8192
+    // t0 partial(lhs)+partial(rhs): 8192+8192
+    // total = 65536 (fail under 60000).
+    // If incorrectly deduped to one t0 partial, total would be 57344 (would pass).
+    problem.fast_memory_capacity = 60'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 64};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
     auto result = mlsys::Evaluate(problem, solution);
     ASSERT_FALSE(result.ok());
     EXPECT_NE(std::string(result.status().message()).find("[Fast Memory Capacity Exceeded]"),
               std::string::npos)
         << result.status().message();
+}
+
+TEST(EvaluateTest, RetainedFullTensorSuppressesLaterPartialRequirement) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 input to sg0
+        {.width = 128, .height = 128}, // t1 produced in sg0, retained full
+        {.width = 128, .height = 128}, // t2 rhs input for sg1 matmul
+        {.width = 128, .height = 128}, // t3 output of sg1
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1}, // sg0 op
+        {.op_type = "MatMul", .inputs = {1, 2}, .outputs = {3}, .base_cost = 1}, // sg1 op
+    };
+    // sg1 capacity with retained full t1:
+    // retained t1 full 16384 + rhs partial t2 8192 + output tile 16384 = 40960 (pass).
+    // If retained full did not suppress partial t1, this would be 49152 (fail).
+    problem.fast_memory_capacity = 45'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg0;
+    sg0.ops = {0};
+    sg0.tensors_to_retain = {1};
+    sg0.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg0.traversal_order = std::nullopt;
+    sg0.subgraph_latency = 1.0;
+
+    mlsys::Subgraph sg1;
+    sg1.ops = {1};
+    sg1.tensors_to_retain = {};
+    sg1.granularity = {.width = 128, .height = 128, .depth = 64};
+    sg1.traversal_order = std::nullopt;
+    sg1.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg0, sg1}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 2.0, 1e-9);
 }
 
 TEST(EvaluateTest, RetainedTensor_OutOfRange_Fail) {

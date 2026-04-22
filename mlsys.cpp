@@ -217,6 +217,7 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
     FastMemoryCapacity fast_memory_usage = 0;
     std::set<size_t> queued_tensors;
     std::set<size_t> full_counted_tensors;
+    std::vector<size_t> partial_counted_usage(problem.tensors.size(), 0);
 
 #ifdef DEBUG
     if (emit_debug) {
@@ -308,13 +309,23 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
 
         size_t const required_size = req_tensor.width * req_tensor.height;
         bool const is_full = is_full_requirement(tensor_idx, req_tensor);
-        if (is_full && full_counted_tensors.contains(tensor_idx)) {
+        if (full_counted_tensors.contains(tensor_idx)) {
             return size_t{0};
+        }
+
+        // Naming asymmetry:
+        // - full move creates a canonical resident name that covers all later partial accesses
+        // - partial moves do not supersede full coverage
+        if (is_full && partial_counted_usage[tensor_idx] > 0) {
+            fast_memory_usage -= partial_counted_usage[tensor_idx];
+            partial_counted_usage[tensor_idx] = 0;
         }
 
         fast_memory_usage += required_size;
         if (is_full) {
             full_counted_tensors.insert(tensor_idx);
+        } else {
+            partial_counted_usage[tensor_idx] += required_size;
         }
         return required_size;
     };

@@ -154,61 +154,65 @@ auto ComputeMapArea(const TilesByTensor& map) -> int64_t {
 
 // Computes how much area must be fetched for `required`.
 // Partial/tiled requirements are counted independently (renamed fetches, no overlap union).
-// Full-tensor requirements are deduplicated per tensor for this step.
-// Reuse is only taken when one resident tile fully covers a required tile.
+// If any full-tensor requirement exists for a tensor in this step, it dominates partials.
+// Partial reuse only happens on exact slice-spec match (or via a resident full tensor).
 auto ComputeMissingArea(const Problem& problem, const TilesByTensor& required,
                         const TilesByTensor& resident) -> int64_t {
     int64_t missing = 0;
 
     for (const auto& [tensor_idx, req_tiles] : required) {
-        auto it = resident.find(tensor_idx);
-        if (it == resident.end()) {
-            bool counted_full_fetch = false;
-            for (const Tile& req_tile : req_tiles) {
-                int64_t const req_area = req_tile.area();
-                if (req_area <= 0) {
-                    continue;
-                }
-                bool const req_is_full = IsFullTensorTile(problem, req_tile);
-                if (req_is_full && counted_full_fetch) {
-                    continue;
-                }
-                missing += req_area;
-                if (req_is_full) {
-                    counted_full_fetch = true;
-                }
+        const std::vector<Tile>* resident_tiles_ptr = nullptr;
+        if (auto it = resident.find(tensor_idx); it != resident.end()) {
+            resident_tiles_ptr = &it->second;
+        }
+        std::vector<Tile> const empty_resident;
+        std::vector<Tile> const& resident_tiles =
+            (resident_tiles_ptr != nullptr) ? *resident_tiles_ptr : empty_resident;
+
+        bool resident_has_full = false;
+        for (const Tile& resident_tile : resident_tiles) {
+            if (IsFullTensorTile(problem, resident_tile)) {
+                resident_has_full = true;
+                break;
             }
+        }
+
+        if (resident_has_full) {
             continue;
         }
 
-        const std::vector<Tile>& resident_tiles = it->second;
-        bool counted_full_fetch = false;
+        bool has_full_requirement = false;
+        for (const Tile& req_tile : req_tiles) {
+            if (req_tile.area() > 0 && IsFullTensorTile(problem, req_tile)) {
+                has_full_requirement = true;
+                break;
+            }
+        }
+
+        if (has_full_requirement) {
+            missing += problem.tensors[tensor_idx].width * problem.tensors[tensor_idx].height;
+            continue;
+        }
+
+        auto is_exact_same_tile = [](const Tile& lhs, const Tile& rhs) {
+            return lhs.tensor_idx == rhs.tensor_idx && lhs.x0 == rhs.x0 && lhs.x1 == rhs.x1 &&
+                   lhs.y0 == rhs.y0 && lhs.y1 == rhs.y1;
+        };
+
         for (const Tile& req_tile : req_tiles) {
             int64_t const req_area = req_tile.area();
             if (req_area <= 0) {
                 continue;
             }
-            bool const req_is_full = IsFullTensorTile(problem, req_tile);
-            if (req_is_full && counted_full_fetch) {
-                continue;
-            }
-
             bool covered = false;
             for (const Tile& resident_tile : resident_tiles) {
-                bool const fully_covers =
-                    resident_tile.x0 <= req_tile.x0 && resident_tile.x1 >= req_tile.x1 &&
-                    resident_tile.y0 <= req_tile.y0 && resident_tile.y1 >= req_tile.y1;
-                if (fully_covers) {
+                if (is_exact_same_tile(resident_tile, req_tile)) {
                     covered = true;
                     break;
                 }
             }
-
             if (!covered) {
                 missing += req_area;
-            }
-            if (req_is_full) {
-                counted_full_fetch = true;
             }
         }
     }
