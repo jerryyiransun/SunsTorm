@@ -47,6 +47,39 @@ readable without making the binary behave like a debug build.
 ./build-relwithdebinfo/mlsys benchmarks/mlsys-2026-1.json out.json
 ```
 
+# Docker Grading Smoke Test
+
+Use the Docker scripts to build and run `mlsys` in an Ubuntu 22.04 `linux/amd64`
+environment that matches the competition runtime target.
+
+Build the final `./mlsys` binary:
+
+```bash
+./run_docker.sh
+```
+
+Run one benchmark under the advertised 8-core / 32 GB cap:
+
+```bash
+./run_docker_benchmark.sh <benchmark-number> <timeout-seconds> [output-json]
+
+# examples
+./run_docker_benchmark.sh 1 5
+./run_docker_benchmark.sh 17 30 output-17.json
+```
+
+The benchmark number maps to `benchmarks/mlsys-2026-<benchmark-number>.json`.
+If no output path is provided, the script writes `output.json`.
+
+Notes:
+
+- `run_docker.sh` builds with `-march=x86-64-v3` inside Ubuntu 22.04 and writes
+  the stripped executable to `./mlsys`.
+- `run_docker_benchmark.sh` runs `./mlsys` in a clean Ubuntu 22.04 container with
+  `--cpus=8 --memory=32g` and fails if the output JSON is empty.
+- On Apple Silicon, Docker uses `linux/amd64` emulation, so this is useful for
+  compatibility smoke testing but not reliable for final timing.
+
 ## Profiling with `perf`
 
 Install `perf` on Ubuntu:
