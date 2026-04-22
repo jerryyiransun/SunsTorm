@@ -75,13 +75,26 @@ auto MaxMatMulDepth(const Problem& problem, const Subgraph& subgraph) -> int64_t
     return max_depth;
 }
 
-auto HasMatMul(const Problem& problem, const Subgraph& subgraph) -> bool {
+auto FinalMatMulDepth(const Problem& problem, const Subgraph& subgraph) -> std::optional<int64_t> {
+    std::set<size_t> consumed;
     for (size_t op_idx : subgraph.ops) {
-        if (problem.ops[op_idx].op_type == "MatMul") {
-            return true;
+        for (size_t input_idx : problem.ops[op_idx].inputs) {
+            consumed.insert(input_idx);
         }
     }
-    return false;
+
+    std::optional<int64_t> max_depth;
+    for (size_t op_idx : subgraph.ops) {
+        const Op& op = problem.ops[op_idx];
+        if (op.op_type != "MatMul" || consumed.contains(op.outputs[0])) {
+            continue;
+        }
+
+        int64_t const depth = problem.tensors[op.inputs[0]].width;
+        max_depth = max_depth.has_value() ? std::max(max_depth.value(), depth) : depth;
+    }
+
+    return max_depth;
 }
 
 auto MaxFinalOutputShape(const Problem& problem, const Subgraph& subgraph) -> Tensor {
@@ -422,17 +435,19 @@ auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& soluti
         DivisorCandidates(output_shape.width, problem.native_granularity.width);
     std::vector<int64_t> height_candidates =
         DivisorCandidates(output_shape.height, problem.native_granularity.height);
+    std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, subgraph);
     std::vector<int64_t> depth_candidates =
-        HasMatMul(problem, subgraph) ? DivisorCandidates(MaxMatMulDepth(problem, subgraph),
-                                                         MaxMatMulDepth(problem, subgraph))
-                                     : std::vector<int64_t>{1};
+        final_matmul_depth.has_value()
+            ? DivisorCandidates(final_matmul_depth.value(), final_matmul_depth.value())
+            : std::vector<int64_t>{1};
 
 #ifdef DEBUG
     std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " begin\n";
     std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " ops=";
     DebugPrintVector(subgraph.ops);
     std::cout << ", output_shape={w=" << output_shape.width << ", h=" << output_shape.height
-              << "}, prev_retained=";
+              << "}, depth_affects_split_k=" << (final_matmul_depth.has_value() ? "true" : "false")
+              << ", prev_retained=";
     DebugPrintVector(
         std::vector<size_t>(prev_retained_tensors.begin(), prev_retained_tensors.end()));
     std::cout << "\n";
