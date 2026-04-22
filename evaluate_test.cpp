@@ -215,24 +215,27 @@ TEST(EvaluateTest, FullSharedInputSuppressesPartialForCapacity) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 128, .height = 128}, // t0 shared input (full + partial requirements)
-        {.width = 128, .height = 128}, // t1 output of op0
-        {.width = 128, .height = 128}, // t2 rhs of matmul op1
-        {.width = 128, .height = 128}, // t3 output of op1
-        {.width = 128, .height = 128}, // t4 second input of pointwise op0
+        {.width = 128, .height = 128}, // t1 rhs of non-final matmul op0
+        {.width = 128, .height = 128}, // t2 intermediate output of op0
+        {.width = 128, .height = 128}, // t3 rhs of final matmul op1
+        {.width = 128, .height = 128}, // t4 output of final matmul op1
+        {.width = 128, .height = 128}, // t5 rhs of final matmul op2
+        {.width = 128, .height = 128}, // t6 output of final matmul op2
     };
     problem.ops = {
-        {.op_type = "Pointwise", .inputs = {0, 4}, .outputs = {1}, .base_cost = 1}, // op0
-        {.op_type = "MatMul", .inputs = {0, 2}, .outputs = {3}, .base_cost = 1},    // op1
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1}, // op0
+        {.op_type = "MatMul", .inputs = {2, 3}, .outputs = {4}, .base_cost = 1}, // op1
+        {.op_type = "MatMul", .inputs = {0, 5}, .outputs = {6}, .base_cost = 1}, // op2
     };
     // Threshold separating old vs clarified behavior:
-    // - old behavior (full+partial both charged for t0): 81920 (fail)
+    // - old behavior (full+partial both charged for t0): 81920 (fail).
     // - clarified behavior (full t0 suppresses partial t0): 73728 (pass)
     problem.fast_memory_capacity = 78'000;
     problem.slow_memory_bandwidth = 10;
     problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
 
     mlsys::Subgraph sg;
-    sg.ops = {0, 1};
+    sg.ops = {0, 1, 2};
     sg.tensors_to_retain = {};
     sg.granularity = {.width = 128, .height = 128, .depth = 64};
     sg.traversal_order = std::nullopt;
@@ -478,6 +481,100 @@ TEST(EvaluateTest, UnaryPointwiseEphemeralInputRemainsFreeInsideSubgraph) {
     auto result = mlsys::Evaluate(problem, solution);
     ASSERT_TRUE(result.ok()) << result.status().message();
     EXPECT_NEAR(result.value(), 1.0, 1e-9);
+}
+
+TEST(EvaluateTest, MultipleFinalOutputsDifferentDimensions_Fail) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64},  // t0 input of op0
+        {.width = 64, .height = 64},  // t1 output of op0
+        {.width = 128, .height = 64}, // t2 input of op1
+        {.width = 128, .height = 64}, // t3 output of op1
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Subgraph Outputs]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, MultipleFinalOutputsDifferentOpTypes_Fail) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64}, // t0 pointwise input
+        {.width = 64, .height = 64}, // t1 pointwise output
+        {.width = 32, .height = 64}, // t2 matmul lhs
+        {.width = 64, .height = 32}, // t3 matmul rhs
+        {.width = 64, .height = 64}, // t4 matmul output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+        {.op_type = "MatMul", .inputs = {2, 3}, .outputs = {4}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Subgraph Outputs]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, PointwiseFinalOutputWithNonUnitK_Fail) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 input
+        {.width = 128, .height = 128}, // t1 output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 2};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Subgraph Outputs]"),
+              std::string::npos)
+        << result.status().message();
 }
 
 TEST(EvaluateTest, FusedMatMulChainMiddleTensorIsEphemeralForCapacity) {

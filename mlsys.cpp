@@ -647,6 +647,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 
         std::set<size_t> subgraph_produced;
         std::set<size_t> subgraph_consumed;
+        std::vector<size_t> final_output_ops;
         for (size_t const op_idx : subgraph.ops) {
             if (op_idx >= problem.ops.size()) {
                 return absl::InvalidArgumentError(
@@ -656,6 +657,39 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             subgraph_produced.insert(out);
             for (size_t const in : problem.ops[op_idx].inputs) {
                 subgraph_consumed.insert(in);
+            }
+        }
+
+        for (size_t const op_idx : subgraph.ops) {
+            size_t const out = problem.ops[op_idx].outputs[0];
+            if (!subgraph_consumed.contains(out)) {
+                final_output_ops.push_back(op_idx);
+            }
+        }
+
+        if (!final_output_ops.empty()) {
+            size_t const reference_op_idx = final_output_ops[0];
+            size_t const reference_output_idx = problem.ops[reference_op_idx].outputs[0];
+            Tensor const reference_shape = problem.tensors[reference_output_idx];
+            const OpType& reference_op_type = problem.ops[reference_op_idx].op_type;
+
+            if (reference_op_type == "Pointwise" && subgraph.granularity.depth != 1) {
+                return absl::InvalidArgumentError(
+                    "[Invalid Subgraph Outputs] Pointwise final output requires k=1");
+            }
+
+            for (size_t const op_idx : final_output_ops) {
+                size_t const output_idx = problem.ops[op_idx].outputs[0];
+                if (problem.tensors[output_idx] != reference_shape) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Subgraph Outputs] Final output tensors must have identical "
+                        "dimensions");
+                }
+                if (problem.ops[op_idx].op_type != reference_op_type) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Subgraph Outputs] Final output operations must have the same "
+                        "type");
+                }
             }
         }
 
