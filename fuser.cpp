@@ -1031,13 +1031,16 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
             auto existing = candidate_idx_by_key.find(key);
             if (existing == candidate_idx_by_key.end()) {
                 candidate_idx_by_key[key] = candidates.size();
-                candidates.push_back(GreedyCandidate {
-                    .type = type, .solution = std::move(solution),
-                    .potential_score = potential_score, .key = key,
+                candidates.push_back(GreedyCandidate{
+                    .type = type,
+                    .solution = std::move(solution),
+                    .potential_score = potential_score,
+                    .key = key,
                     .producer_subgraph_ops = producer_subgraph_ops,
                     .consumer_subgraph_ops = consumer_subgraph_ops,
 #if MLSYS_ENABLE_FUSER_LOGGING
-                    .producer_sg_idx = producer_sg_idx, .consumer_sg_idx = consumer_sg_idx,
+                    .producer_sg_idx = producer_sg_idx,
+                    .consumer_sg_idx = consumer_sg_idx,
                     .touched_tensors = touched_tensors,
 #endif
                 });
@@ -1165,13 +1168,16 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
             auto existing = candidate_idx_by_key.find(key);
             if (existing == candidate_idx_by_key.end()) {
                 candidate_idx_by_key[key] = candidates.size();
-                candidates.push_back(GreedyCandidate {
-                    .type = type, .solution = std::move(solution),
-                    .potential_score = potential_score, .key = key,
+                candidates.push_back(GreedyCandidate{
+                    .type = type,
+                    .solution = std::move(solution),
+                    .potential_score = potential_score,
+                    .key = key,
                     .producer_subgraph_ops = producer_subgraph_ops,
                     .consumer_subgraph_ops = consumer_subgraph_ops,
 #if MLSYS_ENABLE_FUSER_LOGGING
-                    .producer_sg_idx = producer_sg_idx, .consumer_sg_idx = consumer_sg_idx,
+                    .producer_sg_idx = producer_sg_idx,
+                    .consumer_sg_idx = consumer_sg_idx,
                     .touched_tensors = touched_tensors,
 #endif
                 });
@@ -1741,7 +1747,7 @@ void EnumerateSchedules(const Problem& problem, const std::vector<int>& producer
 } // namespace
 
 GreedyFuser::GreedyFuser(GreedyFuserConfig config)
-    : GreedyFuser(config, std::make_unique<CostGuidedDivisorTiler>()) {}
+    : GreedyFuser(config, std::make_unique<GreedyTiler>()) {}
 
 GreedyFuser::GreedyFuser(GreedyFuserConfig config, std::unique_ptr<Tiler> tiler)
     : config_(config), tiler_(std::move(tiler)) {}

@@ -95,6 +95,45 @@ TEST(TilerTest, GreedyTilerStillFindsValidTiling) {
     ASSERT_TRUE(eval.ok()) << eval.status().message();
 }
 
+TEST(TilerTest, GreedyTilerUsesCeilCandidatesBetweenHalvingSteps) {
+    auto problem = MakeSinglePointwiseProblem(384, 128);
+    problem.fast_memory_capacity = 13'000;
+
+    mlsys::GreedyTiler tiler;
+    auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 96);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 64);
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, GreedyTilerWalksDepthCandidatesForSplitK) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 384, .height = 128},
+        {.width = 128, .height = 384},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {{.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000}};
+    problem.fast_memory_capacity = 50'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 1};
+
+    mlsys::GreedyTiler tiler;
+    auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 128);
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
 TEST(TilerTest, CostGuidedDivisorTilerFindsValidTiling) {
     mlsys::Problem problem;
     problem.tensors = {
