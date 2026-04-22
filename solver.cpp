@@ -47,23 +47,23 @@ auto GreedyConfigForProblem(size_t num_ops) -> GreedyFuserConfig {
     constexpr double kTopKFailurePenalty = 0.08;
     if (num_ops <= 4) {
         return GreedyFuserConfig{
-            .search_depth = 12, .beam_width = 32, .topk_failure_penalty = kTopKFailurePenalty};
+            .search_depth = 8, .beam_width = 32, .topk_failure_penalty = kTopKFailurePenalty};
     }
     if (num_ops <= 8) {
         return GreedyFuserConfig{
-            .search_depth = 10, .beam_width = 24, .topk_failure_penalty = kTopKFailurePenalty};
+            .search_depth = 4, .beam_width = 24, .topk_failure_penalty = kTopKFailurePenalty};
     }
     if (num_ops <= 16) {
         return GreedyFuserConfig{
-            .search_depth = 8, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
+            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
     }
     if (num_ops <= 32) {
         return GreedyFuserConfig{
-            .search_depth = 6, .beam_width = 12, .topk_failure_penalty = kTopKFailurePenalty};
+            .search_depth = 4, .beam_width = 12, .topk_failure_penalty = kTopKFailurePenalty};
     }
     if (num_ops <= 64) {
         return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 8, .topk_failure_penalty = kTopKFailurePenalty};
+            .search_depth = 2, .beam_width = 8, .topk_failure_penalty = kTopKFailurePenalty};
     }
     return GreedyFuserConfig{
         .search_depth = 3, .beam_width = 6, .topk_failure_penalty = kTopKFailurePenalty};

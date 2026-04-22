@@ -46,7 +46,6 @@ struct SubgraphTensorUsage {
 
 enum class GreedyMoveType {
     kDirectFuse,
-    kCloneFuse,
     kRetain,
 };
 
@@ -54,8 +53,6 @@ auto MoveTypeName(GreedyMoveType type) -> const char* {
     switch (type) {
     case GreedyMoveType::kDirectFuse:
         return "DirectFuse";
-    case GreedyMoveType::kCloneFuse:
-        return "CloneFuse";
     case GreedyMoveType::kRetain:
         return "Retain";
     }
@@ -509,7 +506,7 @@ void LogExplorativeFusion(const std::string& explore_id, const GreedySearchFrame
                   << "," << FormatIndexListForLog(candidate.consumer_subgraph_ops) << "]";
     LogFuserDebugLine(pair_ops_line.str());
 
-    if (candidate.type == GreedyMoveType::kRetain || candidate.type == GreedyMoveType::kCloneFuse) {
+    if (candidate.type == GreedyMoveType::kRetain) {
         std::ostringstream impacted_line;
         impacted_line << "impacted_subgraph_output_tile_sizes="
                       << FormatImpactedSubgraphOutputTileSizesForLog(candidate, evaluated_solution);
@@ -844,19 +841,6 @@ auto BuildDirectMergeSolution(const Solution& solution, size_t producer_sg_idx,
     return merged_solution;
 }
 
-auto BuildCloneFuseSolution(const Solution& solution, size_t producer_sg_idx,
-                            size_t consumer_sg_idx, const std::vector<size_t>& topo_rank)
-    -> Solution {
-    Solution cloned_solution = solution;
-    Subgraph& fused_subgraph = cloned_solution.subgraphs[consumer_sg_idx];
-    fused_subgraph.ops.insert(fused_subgraph.ops.end(),
-                              solution.subgraphs[producer_sg_idx].ops.begin(),
-                              solution.subgraphs[producer_sg_idx].ops.end());
-    CanonicalizeOps(fused_subgraph.ops, topo_rank);
-    CanonicalizeTensors(fused_subgraph.tensors_to_retain);
-    return cloned_solution;
-}
-
 auto BuildRetainSolution(const Solution& solution, size_t producer_sg_idx, size_t consumer_sg_idx,
                          const std::vector<size_t>& tensor_indices) -> Solution {
     Solution retained_solution = solution;
@@ -1031,16 +1015,13 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
             auto existing = candidate_idx_by_key.find(key);
             if (existing == candidate_idx_by_key.end()) {
                 candidate_idx_by_key[key] = candidates.size();
-                candidates.push_back(GreedyCandidate{
-                    .type = type,
-                    .solution = std::move(solution),
-                    .potential_score = potential_score,
-                    .key = key,
+                candidates.push_back(GreedyCandidate {
+                    .type = type, .solution = std::move(solution),
+                    .potential_score = potential_score, .key = key,
                     .producer_subgraph_ops = producer_subgraph_ops,
                     .consumer_subgraph_ops = consumer_subgraph_ops,
 #if MLSYS_ENABLE_FUSER_LOGGING
-                    .producer_sg_idx = producer_sg_idx,
-                    .consumer_sg_idx = consumer_sg_idx,
+                    .producer_sg_idx = producer_sg_idx, .consumer_sg_idx = consumer_sg_idx,
                     .touched_tensors = touched_tensors,
 #endif
                 });
@@ -1097,18 +1078,6 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
                                          producer_sg_idx, consumer_sg_idx, shared_tensors));
             }
 
-            Solution clone_fuse =
-                BuildCloneFuseSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
-            if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, clone_fuse)) {
-                int64_t const clone_score =
-                    potential_saving_multiplier * ComputeNewlyInternalizedBoundaryScore(
-                                                      problem, producer_op, state, producer_sg_idx,
-                                                      consumer_sg_idx, shared_tensors, clone_fuse);
-                AddOrUpdateCandidate(GreedyMoveType::kCloneFuse, std::move(clone_fuse), clone_score,
-                                     state.subgraphs[producer_sg_idx].ops,
-                                     state.subgraphs[consumer_sg_idx].ops MLSYS_FUSER_LOG_ARGS(
-                                         producer_sg_idx, consumer_sg_idx, shared_tensors));
-            }
             int64_t retain_score = 0;
             for (size_t tensor_idx : shared_tensors) {
                 int64_t const tensor_score = TensorSize(problem, tensor_idx);
@@ -1168,16 +1137,13 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
             auto existing = candidate_idx_by_key.find(key);
             if (existing == candidate_idx_by_key.end()) {
                 candidate_idx_by_key[key] = candidates.size();
-                candidates.push_back(GreedyCandidate{
-                    .type = type,
-                    .solution = std::move(solution),
-                    .potential_score = potential_score,
-                    .key = key,
+                candidates.push_back(GreedyCandidate {
+                    .type = type, .solution = std::move(solution),
+                    .potential_score = potential_score, .key = key,
                     .producer_subgraph_ops = producer_subgraph_ops,
                     .consumer_subgraph_ops = consumer_subgraph_ops,
 #if MLSYS_ENABLE_FUSER_LOGGING
-                    .producer_sg_idx = producer_sg_idx,
-                    .consumer_sg_idx = consumer_sg_idx,
+                    .producer_sg_idx = producer_sg_idx, .consumer_sg_idx = consumer_sg_idx,
                     .touched_tensors = touched_tensors,
 #endif
                 });
@@ -1241,21 +1207,6 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
                     AverageScoreByTensorCount(direct_raw_score, shared_tensor_count);
                 AddOrUpdateCandidate(GreedyMoveType::kDirectFuse, std::move(direct_merge),
                                      direct_score, state.subgraphs[producer_sg_idx].ops,
-                                     state.subgraphs[consumer_sg_idx].ops MLSYS_FUSER_LOG_ARGS(
-                                         producer_sg_idx, consumer_sg_idx, shared_tensors));
-            }
-
-            Solution clone_fuse =
-                BuildCloneFuseSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
-            if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, clone_fuse)) {
-                int64_t const clone_raw_score =
-                    potential_saving_multiplier * ComputeNewlyInternalizedBoundaryScore(
-                                                      problem, producer_op, state, producer_sg_idx,
-                                                      consumer_sg_idx, shared_tensors, clone_fuse);
-                int64_t const clone_score =
-                    AverageScoreByTensorCount(clone_raw_score, shared_tensor_count);
-                AddOrUpdateCandidate(GreedyMoveType::kCloneFuse, std::move(clone_fuse), clone_score,
-                                     state.subgraphs[producer_sg_idx].ops,
                                      state.subgraphs[consumer_sg_idx].ops MLSYS_FUSER_LOG_ARGS(
                                          producer_sg_idx, consumer_sg_idx, shared_tensors));
             }

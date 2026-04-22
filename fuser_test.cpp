@@ -61,6 +61,18 @@ auto SubgraphConsumesTensor(const mlsys::Problem& problem, const mlsys::Subgraph
     return false;
 }
 
+auto CountOpOccurrences(const mlsys::Solution& solution, size_t op_idx) -> size_t {
+    size_t count = 0;
+    for (const auto& subgraph : solution.subgraphs) {
+        for (size_t subgraph_op_idx : subgraph.ops) {
+            if (subgraph_op_idx == op_idx) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
 TEST(FuserTest, EnumeratesRecomputedBranchProducerAcrossSubgraphs) {
     mlsys::Problem problem;
     problem.tensors = {
@@ -97,7 +109,7 @@ TEST(FuserTest, EnumeratesRecomputedBranchProducerAcrossSubgraphs) {
     EXPECT_TRUE(found_recomputed_schedule);
 }
 
-TEST(FuserTest, GreedyFindsDiamondRecomputationSchedule) {
+TEST(FuserTest, GreedyAvoidsDiamondRecomputationSchedule) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 256, .height = 256},
@@ -118,19 +130,7 @@ TEST(FuserTest, GreedyFindsDiamondRecomputationSchedule) {
     auto solution = fuser.fuse(problem);
     ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    bool found_left_branch = false;
-    bool found_right_branch = false;
-    for (const auto& subgraph : solution->subgraphs) {
-        if (subgraph.ops == std::vector<size_t>({0, 1})) {
-            found_left_branch = true;
-        }
-        if (subgraph.ops == std::vector<size_t>({0, 2})) {
-            found_right_branch = true;
-        }
-    }
-
-    EXPECT_TRUE(found_left_branch) << FormatSolution(*solution);
-    EXPECT_TRUE(found_right_branch) << FormatSolution(*solution);
+    EXPECT_EQ(CountOpOccurrences(*solution, 0), 1u) << FormatSolution(*solution);
     ExpectGreedySolutionValid(problem, *solution);
 }
 
@@ -404,7 +404,7 @@ TEST(FuserTest, UsesExplicitTopologicalOrderForGeneratedSolution) {
     ExpectGreedySolutionValid(problem, *solution);
 }
 
-TEST(FuserTest, BeamWidthOneStillFindsRecomputationSchedule) {
+TEST(FuserTest, BeamWidthOneAvoidsRecomputationSchedule) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 256, .height = 256},
@@ -425,19 +425,7 @@ TEST(FuserTest, BeamWidthOneStillFindsRecomputationSchedule) {
     auto solution = fuser.fuse(problem);
     ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    bool found_left_branch = false;
-    bool found_right_branch = false;
-    for (const auto& subgraph : solution->subgraphs) {
-        if (subgraph.ops == std::vector<size_t>({0, 1})) {
-            found_left_branch = true;
-        }
-        if (subgraph.ops == std::vector<size_t>({0, 2})) {
-            found_right_branch = true;
-        }
-    }
-
-    EXPECT_TRUE(found_left_branch) << FormatSolution(*solution);
-    EXPECT_TRUE(found_right_branch) << FormatSolution(*solution);
+    EXPECT_EQ(CountOpOccurrences(*solution, 0), 1u) << FormatSolution(*solution);
     ExpectGreedySolutionValid(problem, *solution);
 }
 
