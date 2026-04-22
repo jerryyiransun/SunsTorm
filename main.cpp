@@ -27,7 +27,7 @@ auto main(int argc, char* argv[]) -> int {
     }
     Problem problem = problem_status.value();
 
-    std::unique_ptr<Solver> solver = std::make_unique<GreedySolver>();
+    std::unique_ptr<Solver> solver = std::make_unique<GreedySolver>(output_path);
     auto solution_status = solver->solve(problem);
     if (solution_status.ok() == false) {
         std::cerr << "Error solving problem: " << solution_status.status().message() << "\n";
@@ -43,7 +43,7 @@ auto main(int argc, char* argv[]) -> int {
         std::cerr << "Error evaluating solution: " << eval_status.status().message() << "\n";
     }
 
-    auto write_status = WriteSolution(solution, output_path);
+    auto write_status = WriteSolutionAtomically(solution, output_path);
     if (write_status.ok() == false) {
         std::cerr << "Error writing output: " << write_status.message() << "\n";
         return 1;

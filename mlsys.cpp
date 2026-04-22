@@ -6,14 +6,20 @@
 #include "nlohmann/json_fwd.hpp"
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -40,6 +46,65 @@ using ordered_json = nlohmann::ordered_json;
 #endif
 
 namespace mlsys {
+
+namespace {
+
+auto SolutionToJson(const Solution& solution) -> ordered_json {
+    ordered_json j;
+
+    j["subgraphs"] = ordered_json::array();
+    j["granularities"] = ordered_json::array();
+    j["tensors_to_retain"] = ordered_json::array();
+    j["traversal_orders"] = ordered_json::array();
+    j["subgraph_latencies"] = ordered_json::array();
+
+    for (const auto& sg : solution.subgraphs) {
+        j["subgraphs"].push_back(sg.ops);
+        j["granularities"].push_back(
+            {sg.granularity.width, sg.granularity.height, sg.granularity.depth});
+        j["tensors_to_retain"].push_back(sg.tensors_to_retain);
+
+        if (sg.traversal_order.has_value()) {
+            j["traversal_orders"].push_back(sg.traversal_order.value());
+        } else {
+            j["traversal_orders"].push_back(nullptr);
+        }
+
+        j["subgraph_latencies"].push_back(sg.subgraph_latency);
+    }
+
+    return j;
+}
+
+auto WriteSolutionJsonToPath(const ordered_json& solution_json, const std::filesystem::path& path)
+    -> Status {
+    std::ofstream out_file(path);
+    if (!out_file.is_open()) {
+        return absl::NotFoundError("Failed to open output file: " + path.string());
+    }
+
+    out_file << solution_json.dump(2) << '\n';
+    out_file.close();
+    if (!out_file) {
+        return absl::InternalError("Failed to write output file: " + path.string());
+    }
+
+    return absl::OkStatus();
+}
+
+auto MakeTemporarySolutionPath(const std::filesystem::path& output_path) -> std::filesystem::path {
+    std::filesystem::path parent = output_path.parent_path();
+    if (parent.empty()) {
+        parent = ".";
+    }
+
+    std::ostringstream suffix;
+    suffix << ".tmp." << std::chrono::steady_clock::now().time_since_epoch().count() << "."
+           << std::hash<std::thread::id>{}(std::this_thread::get_id());
+    return parent / ("." + output_path.filename().string() + suffix.str());
+}
+
+} // namespace
 
 auto ReadProblem(const std::string& filename) -> StatusOr<Problem> {
     std::ifstream file(filename);
@@ -850,37 +915,26 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 }
 
 auto WriteSolution(const Solution& solution, const std::string& filename) -> Status {
-    ordered_json j;
+    return WriteSolutionJsonToPath(SolutionToJson(solution), std::filesystem::path(filename));
+}
 
-    j["subgraphs"] = ordered_json::array();
-    j["granularities"] = ordered_json::array();
-    j["tensors_to_retain"] = ordered_json::array();
-    j["traversal_orders"] = ordered_json::array();
-    j["subgraph_latencies"] = ordered_json::array();
+auto WriteSolutionAtomically(const Solution& solution, const std::string& filename) -> Status {
+    std::filesystem::path const output_path(filename);
+    std::filesystem::path const temp_path = MakeTemporarySolutionPath(output_path);
 
-    for (const auto& sg : solution.subgraphs) {
-        j["subgraphs"].push_back(sg.ops);
-        j["granularities"].push_back(
-            {sg.granularity.width, sg.granularity.height, sg.granularity.depth});
-        j["tensors_to_retain"].push_back(sg.tensors_to_retain);
-
-        if (sg.traversal_order.has_value()) {
-            j["traversal_orders"].push_back(sg.traversal_order.value());
-        } else {
-            j["traversal_orders"].push_back(nullptr);
-        }
-
-        j["subgraph_latencies"].push_back(sg.subgraph_latency);
+    auto write_status = WriteSolutionJsonToPath(SolutionToJson(solution), temp_path);
+    if (!write_status.ok()) {
+        return write_status;
     }
 
-    // Write to file with a 2-space indentation for readability
-    std::ofstream out_file(filename);
-    if (!out_file.is_open()) {
-        return absl::NotFoundError("Failed to open output file: " + filename);
+    std::error_code rename_error;
+    std::filesystem::rename(temp_path, output_path, rename_error);
+    if (rename_error) {
+        std::error_code remove_error;
+        std::filesystem::remove(temp_path, remove_error);
+        return absl::InternalError("Failed to atomically replace output file: " +
+                                   rename_error.message());
     }
-
-    out_file << j.dump(2) << '\n';
-    out_file.close();
 
     return absl::OkStatus();
 }

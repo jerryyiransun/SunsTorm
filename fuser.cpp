@@ -49,6 +49,8 @@ enum class GreedyMoveType {
     kRetain,
 };
 
+constexpr int64_t kDirectFuseScoreMultiplier = 2;
+
 auto MoveTypeName(GreedyMoveType type) -> const char* {
     switch (type) {
     case GreedyMoveType::kDirectFuse:
@@ -157,6 +159,7 @@ struct SearchContext {
     bool has_best = false;
     double best_cost = std::numeric_limits<double>::infinity();
     Solution best_solution;
+    BestSolutionCallback best_solution_callback;
 };
 
 struct SubgraphEdgeDegree {
@@ -1199,8 +1202,8 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
             Solution direct_merge =
                 BuildDirectMergeSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
             if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, direct_merge)) {
-                int64_t const direct_raw_score = potential_saving_multiplier *
-                                                 ComputeNewlyInternalizedBoundaryScore(
+                int64_t const direct_raw_score =
+                    kDirectFuseScoreMultiplier * ComputeNewlyInternalizedBoundaryScore(
                                                      problem, producer_op, state, producer_sg_idx,
                                                      consumer_sg_idx, shared_tensors, direct_merge);
                 int64_t const direct_score =
@@ -1227,7 +1230,7 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
                                                  retain_candidate)) {
                     int64_t const retain_raw_score = potential_saving_multiplier * retain_total;
                     int64_t const retain_score =
-                        AverageScoreByTensorCount(retain_raw_score, shared_tensor_count);
+                        AverageScoreByTensorCount(retain_total, shared_tensor_count);
                     AddOrUpdateCandidate(GreedyMoveType::kRetain, std::move(retain_candidate),
                                          retain_score, state.subgraphs[producer_sg_idx].ops,
                                          state.subgraphs[consumer_sg_idx].ops MLSYS_FUSER_LOG_ARGS(
@@ -1265,7 +1268,7 @@ auto EvaluateCandidateState(SearchContext& context, const GreedyCandidate& candi
     return evaluation;
 }
 
-auto MaybeUpdateBest(SearchContext& context, const ExactEvaluation& evaluation) -> bool {
+auto MaybeUpdateBest(SearchContext& context, const ExactEvaluation& evaluation) -> StatusOr<bool> {
     if (!evaluation.valid) {
         return false;
     }
@@ -1273,6 +1276,13 @@ auto MaybeUpdateBest(SearchContext& context, const ExactEvaluation& evaluation) 
         context.has_best = true;
         context.best_cost = evaluation.total_latency;
         context.best_solution = evaluation.solution;
+        if (context.best_solution_callback) {
+            absl::Status callback_status =
+                context.best_solution_callback(context.best_solution, context.best_cost);
+            if (!callback_status.ok()) {
+                return callback_status;
+            }
+        }
         return true;
     }
     return false;
@@ -1406,10 +1416,10 @@ auto TopScoringFusions(SearchContext& context, const Solution& state)
     return inserted_it->second;
 }
 
-void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& context,
+auto RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& context,
                               const Solution& initial_state,
                               const Solution& initial_evaluated_state,
-                              bool has_initial_evaluated_state, double initial_cost) {
+                              bool has_initial_evaluated_state, double initial_cost) -> Status {
     std::stack<GreedySearchFrame> fusion_stack;
     fusion_stack.push(GreedySearchFrame{
         .state = initial_state,
@@ -1488,7 +1498,11 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
                 continue;
             }
             ++valid_evaluated;
-            bool const best_updated = MaybeUpdateBest(context, evaluation);
+            auto best_updated_or = MaybeUpdateBest(context, evaluation);
+            if (!best_updated_or.ok()) {
+                return best_updated_or.status();
+            }
+            bool const best_updated = best_updated_or.value();
             if (best_updated) {
                 best_update_event = BestUpdateEvent{
                     .depth = frame.depth,
@@ -1585,6 +1599,7 @@ void RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
 #if MLSYS_ENABLE_FUSER_LOGGING
     LogFinalBestSelection(context);
 #endif
+    return absl::OkStatus();
 }
 auto BuildInitialGreedySolution(const Problem& problem, const TopologyInfo& topo,
                                 const std::vector<int>& producer_op) -> StatusOr<Solution> {
@@ -1700,8 +1715,16 @@ void EnumerateSchedules(const Problem& problem, const std::vector<int>& producer
 GreedyFuser::GreedyFuser(GreedyFuserConfig config)
     : GreedyFuser(config, std::make_unique<GreedyTiler>()) {}
 
+GreedyFuser::GreedyFuser(GreedyFuserConfig config, BestSolutionCallback best_solution_callback)
+    : GreedyFuser(config, std::make_unique<GreedyTiler>(), std::move(best_solution_callback)) {}
+
 GreedyFuser::GreedyFuser(GreedyFuserConfig config, std::unique_ptr<Tiler> tiler)
-    : config_(config), tiler_(std::move(tiler)) {}
+    : GreedyFuser(config, std::move(tiler), nullptr) {}
+
+GreedyFuser::GreedyFuser(GreedyFuserConfig config, std::unique_ptr<Tiler> tiler,
+                         BestSolutionCallback best_solution_callback)
+    : config_(config), tiler_(std::move(tiler)),
+      best_solution_callback_(std::move(best_solution_callback)) {}
 
 GreedyFuser::~GreedyFuser() = default;
 
@@ -1741,6 +1764,7 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
         .topo = topo,
         .tiler = tiler_.get(),
         .cost_model = CostModel(problem),
+        .best_solution_callback = best_solution_callback_,
     };
 
     GreedyCandidate root_candidate{
@@ -1750,14 +1774,21 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
         .key = MakeStateKey(initial_solution),
     };
     const ExactEvaluation& root_evaluation = EvaluateCandidateState(context, root_candidate);
-    MaybeUpdateBest(context, root_evaluation);
+    auto root_best_or = MaybeUpdateBest(context, root_evaluation);
+    if (!root_best_or.ok()) {
+        return root_best_or.status();
+    }
 
     Solution const root_evaluated_solution =
         root_evaluation.valid ? root_evaluation.solution : initial_solution;
     double const initial_cost = root_evaluation.valid ? root_evaluation.total_latency
                                                       : std::numeric_limits<double>::infinity();
-    RunGreedyLookaheadSearch(config_, context, initial_solution, root_evaluated_solution,
-                             root_evaluation.valid, initial_cost);
+    auto search_status =
+        RunGreedyLookaheadSearch(config_, context, initial_solution, root_evaluated_solution,
+                                 root_evaluation.valid, initial_cost);
+    if (!search_status.ok()) {
+        return search_status;
+    }
 
     if (!context.has_best) {
         return absl::InternalError("Greedy fuser found no valid plans");

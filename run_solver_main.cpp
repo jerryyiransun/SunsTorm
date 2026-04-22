@@ -76,10 +76,10 @@ auto SolverName(SolverKind kind) -> std::string {
     return "UnknownSolver";
 }
 
-auto BuildSolver(SolverKind kind) -> std::unique_ptr<Solver> {
+auto BuildSolver(SolverKind kind, const std::string& output_path) -> std::unique_ptr<Solver> {
     switch (kind) {
     case SolverKind::kGreedy:
-        return std::make_unique<GreedySolver>();
+        return std::make_unique<GreedySolver>(output_path);
     case SolverKind::kBase:
         return std::make_unique<BaseSolver>();
     case SolverKind::kHeuristic:
@@ -183,7 +183,7 @@ auto main(int argc, char* argv[]) -> int {
     }
     Problem problem = problem_status.value();
 
-    std::unique_ptr<Solver> solver = BuildSolver(solver_kind);
+    std::unique_ptr<Solver> solver = BuildSolver(solver_kind, options.output_path);
     if (solver == nullptr) {
         std::cerr << "Error: failed to build solver instance for " << solver_name << "\n";
         return 1;
@@ -204,7 +204,7 @@ auto main(int argc, char* argv[]) -> int {
         std::cerr << "Error evaluating solution: " << eval_status.status().message() << "\n";
     }
 
-    auto write_status = WriteSolution(solution, options.output_path);
+    auto write_status = WriteSolutionAtomically(solution, options.output_path);
     if (write_status.ok() == false) {
         std::cerr << "Error writing output: " << write_status.message() << "\n";
         return 1;

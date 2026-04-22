@@ -14,6 +14,7 @@ option(MLSYS_ENABLE_FUSER_LOGGING "Enable compile-time greedy fuser logging inst
 find_program(CLANG_FORMAT_EXE NAMES "clang-format")
 
 include(FetchContent)
+find_package(Threads REQUIRED)
 
 # Fetch Abseil
 FetchContent_Declare(
@@ -37,7 +38,15 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 
 # Define a common library for shared logic
-add_library(mlsys_lib STATIC mlsys.cpp fuser.cpp fuser_logging.cpp tiler.cpp cost_model.cpp solver.cpp)
+add_library(mlsys_lib STATIC
+    mlsys.cpp
+    fuser.cpp
+    fuser_logging.cpp
+    tiler.cpp
+    cost_model.cpp
+    solver.cpp
+    solution_writer.cpp
+)
 target_include_directories(mlsys_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(mlsys_lib PUBLIC
     MLSYS_ENABLE_FUSER_LOGGING=$<BOOL:${MLSYS_ENABLE_FUSER_LOGGING}>
@@ -47,6 +56,7 @@ target_link_libraries(mlsys_lib PUBLIC
     absl::statusor
     absl::time
     nlohmann_json::nlohmann_json
+    Threads::Threads
 )
 
 # Define the main executable
@@ -77,6 +87,7 @@ add_mlsys_test(tiler_test tiler_test.cpp)
 add_mlsys_test(fuser_test fuser_test.cpp)
 add_mlsys_test(cost_model_test cost_model_test.cpp)
 add_mlsys_test(solver_test solver_test.cpp)
+add_mlsys_test(solution_writer_test solution_writer_test.cpp)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(mlsys_lib PRIVATE DEBUG)
@@ -88,6 +99,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(fuser_test PRIVATE DEBUG)
     target_compile_definitions(cost_model_test PRIVATE DEBUG)
     target_compile_definitions(solver_test PRIVATE DEBUG)
+    target_compile_definitions(solution_writer_test PRIVATE DEBUG)
 endif()
 
 if(CLANG_FORMAT_EXE)
