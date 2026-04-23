@@ -6,14 +6,20 @@
 #include "nlohmann/json_fwd.hpp"
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -40,6 +46,65 @@ using ordered_json = nlohmann::ordered_json;
 #endif
 
 namespace mlsys {
+
+namespace {
+
+auto SolutionToJson(const Solution& solution) -> ordered_json {
+    ordered_json j;
+
+    j["subgraphs"] = ordered_json::array();
+    j["granularities"] = ordered_json::array();
+    j["tensors_to_retain"] = ordered_json::array();
+    j["traversal_orders"] = ordered_json::array();
+    j["subgraph_latencies"] = ordered_json::array();
+
+    for (const auto& sg : solution.subgraphs) {
+        j["subgraphs"].push_back(sg.ops);
+        j["granularities"].push_back(
+            {sg.granularity.width, sg.granularity.height, sg.granularity.depth});
+        j["tensors_to_retain"].push_back(sg.tensors_to_retain);
+
+        if (sg.traversal_order.has_value()) {
+            j["traversal_orders"].push_back(sg.traversal_order.value());
+        } else {
+            j["traversal_orders"].push_back(nullptr);
+        }
+
+        j["subgraph_latencies"].push_back(sg.subgraph_latency);
+    }
+
+    return j;
+}
+
+auto WriteSolutionJsonToPath(const ordered_json& solution_json, const std::filesystem::path& path)
+    -> Status {
+    std::ofstream out_file(path);
+    if (!out_file.is_open()) {
+        return absl::NotFoundError("Failed to open output file: " + path.string());
+    }
+
+    out_file << solution_json.dump(2) << '\n';
+    out_file.close();
+    if (!out_file) {
+        return absl::InternalError("Failed to write output file: " + path.string());
+    }
+
+    return absl::OkStatus();
+}
+
+auto MakeTemporarySolutionPath(const std::filesystem::path& output_path) -> std::filesystem::path {
+    std::filesystem::path parent = output_path.parent_path();
+    if (parent.empty()) {
+        parent = ".";
+    }
+
+    std::ostringstream suffix;
+    suffix << ".tmp." << std::chrono::steady_clock::now().time_since_epoch().count() << "."
+           << std::hash<std::thread::id>{}(std::this_thread::get_id());
+    return parent / ("." + output_path.filename().string() + suffix.str());
+}
+
+} // namespace
 
 auto ReadProblem(const std::string& filename) -> StatusOr<Problem> {
     std::ifstream file(filename);
@@ -99,7 +164,8 @@ auto ReadProblem(const std::string& filename) -> StatusOr<Problem> {
         if (gran.size() >= 2) {
             problem.native_granularity.width = gran[0].get<Width>();
             problem.native_granularity.height = gran[1].get<Height>();
-            problem.native_granularity.depth = 1;
+            problem.native_granularity.depth =
+                gran.size() >= 3 ? gran[2].get<Depth>() : gran[0].get<Depth>();
         } else {
             return absl::InvalidArgumentError("native_granularity must have at least 2 elements");
         }
@@ -217,6 +283,7 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
     FastMemoryCapacity fast_memory_usage = 0;
     std::set<size_t> queued_tensors;
     std::set<size_t> full_counted_tensors;
+    std::vector<size_t> partial_counted_usage(problem.tensors.size(), 0);
 
 #ifdef DEBUG
     if (emit_debug) {
@@ -308,15 +375,58 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
 
         size_t const required_size = req_tensor.width * req_tensor.height;
         bool const is_full = is_full_requirement(tensor_idx, req_tensor);
-        if (is_full && full_counted_tensors.contains(tensor_idx)) {
+        if (full_counted_tensors.contains(tensor_idx)) {
             return size_t{0};
+        }
+
+        // Naming asymmetry:
+        // - full move creates a canonical resident name that covers all later partial accesses
+        // - partial moves do not supersede full coverage
+        if (is_full && partial_counted_usage[tensor_idx] > 0) {
+            fast_memory_usage -= partial_counted_usage[tensor_idx];
+            partial_counted_usage[tensor_idx] = 0;
         }
 
         fast_memory_usage += required_size;
         if (is_full) {
             full_counted_tensors.insert(tensor_idx);
+        } else {
+            partial_counted_usage[tensor_idx] += required_size;
         }
         return required_size;
+    };
+    auto ignored_tensor_reason = [&](size_t tensor_idx) {
+        std::string reason;
+        if (final_output_tensors.contains(tensor_idx)) {
+            reason += "final_output";
+        }
+        if (to_be_retained_tensors.contains(tensor_idx)) {
+            if (!reason.empty()) {
+                reason += ",";
+            }
+            reason += "retain_next";
+        }
+        if (prev_retained_tensors.contains(tensor_idx)) {
+            if (!reason.empty()) {
+                reason += ",";
+            }
+            reason += "retain_prev";
+        }
+        return reason;
+    };
+    auto emit_ignored_debug = [&](const std::string& site, size_t tensor_idx) {
+#ifdef DEBUG
+        if (emit_debug) {
+            bool const is_ephemeral_candidate = subgraph_produced.contains(tensor_idx);
+            std::cout
+                << "[DEBUG] " << site << " Tensor " << tensor_idx << " skipped by ignore-set ("
+                << ignored_tensor_reason(tensor_idx) << ")"
+                << (is_ephemeral_candidate
+                        ? "; ephemeral candidate, but memory path was pre-accounted by ignore-set"
+                        : "; not produced in this subgraph")
+                << " | total_mem=" << fast_memory_usage << "\n";
+        }
+#endif
     };
 
     while (head < q.size()) {
@@ -330,7 +440,7 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
         if (op_idx == -1 || !subgraph_ops.contains(static_cast<size_t>(op_idx))) {
 #ifdef DEBUG
             if (emit_debug) {
-                std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx
+                std::cout << "[DEBUG] Visit Tensor " << curr_tensor_idx
                           << " req_w=" << curr_tensor_dim.width
                           << " req_h=" << curr_tensor_dim.height << " is_final=" << is_final
                           << (op_idx == -1 ? " from OP -1 (Global Input)\n"
@@ -347,7 +457,7 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
 
 #ifdef DEBUG
         if (emit_debug) {
-            std::cout << "[DEBUG] Popped Tensor " << curr_tensor_idx
+            std::cout << "[DEBUG] Visit Tensor " << curr_tensor_idx
                       << " req_w=" << curr_tensor_dim.width << " req_h=" << curr_tensor_dim.height
                       << " is_final=" << is_final << " from OP " << op_idx << "\n";
         }
@@ -392,6 +502,8 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
                     queued_tensors.insert(lhs_tensor_idx);
                     q.emplace_back(lhs_tensor_idx, lhs_tensor, false);
                 }
+            } else {
+                emit_ignored_debug("MatMul LHS", lhs_tensor_idx);
             }
 
             Tensor rhs_tensor{
@@ -420,19 +532,43 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
                     queued_tensors.insert(rhs_tensor_idx);
                     q.emplace_back(rhs_tensor_idx, rhs_tensor, false);
                 }
+            } else {
+                emit_ignored_debug("MatMul RHS", rhs_tensor_idx);
             }
         } else if (op.op_type == "Pointwise") {
             if (op.inputs.size() == 1) {
                 size_t const in_tensor_idx = op.inputs[0];
                 bool const in_is_ignored = is_ignored_tensor_in_backward(in_tensor_idx);
-                if (!in_is_ignored && !queued_tensors.contains(in_tensor_idx)) {
-                    queued_tensors.insert(in_tensor_idx);
-                    q.emplace_back(in_tensor_idx, curr_tensor_dim, false);
+                if (!in_is_ignored) {
+                    bool const in_is_ephemeral = (subgraph_produced.contains(in_tensor_idx));
+                    bool const in_is_retained = (prev_retained_tensors.contains(in_tensor_idx));
+                    size_t const in_added_size = add_requirement_usage(
+                        in_tensor_idx, curr_tensor_dim, in_is_ephemeral, in_is_retained);
+#ifdef DEBUG
+                    if (emit_debug) {
+                        std::cout << "[DEBUG] Pointwise Unary Input Tensor " << in_tensor_idx
+                                  << (in_is_ephemeral ? " is EPHEMERAL! Takes 0 bytes"
+                                      : in_is_retained
+                                          ? " is RETAINED! Takes 0 bytes"
+                                          : " takes " + std::to_string(in_added_size) +
+                                                " (req_w=" + std::to_string(curr_tensor_dim.width) +
+                                                " req_h=" + std::to_string(curr_tensor_dim.height) +
+                                                ")")
+                                  << " | total_mem=" << fast_memory_usage << "\n";
+                    }
+#endif
+                    if (!queued_tensors.contains(in_tensor_idx)) {
+                        queued_tensors.insert(in_tensor_idx);
+                        q.emplace_back(in_tensor_idx, curr_tensor_dim, false);
+                    }
+                } else {
+                    emit_ignored_debug("Pointwise Unary Input", in_tensor_idx);
                 }
             } else {
                 for (size_t const in_tensor_idx : op.inputs) {
                     bool const in_is_ignored = is_ignored_tensor_in_backward(in_tensor_idx);
                     if (in_is_ignored) {
+                        emit_ignored_debug("Pointwise Input", in_tensor_idx);
                         continue;
                     }
 
@@ -481,6 +617,15 @@ auto SubgraphFitsFastMemory(const Problem& problem, const Solution& solution, si
     return SubgraphFitsFastMemoryImpl(problem, solution, subgraph_idx, prev_retained_tensors,
                                       producer_op, false);
 }
+
+#ifdef DEBUG
+auto DebugSubgraphFitsFastMemory(const Problem& problem, const Solution& solution,
+                                 size_t subgraph_idx, const std::set<size_t>& prev_retained_tensors,
+                                 const std::vector<int>& producer_op) -> bool {
+    return SubgraphFitsFastMemoryImpl(problem, solution, subgraph_idx, prev_retained_tensors,
+                                      producer_op, true);
+}
+#endif
 
 StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution) {
 #ifdef DEBUG
@@ -568,6 +713,7 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 
         std::set<size_t> subgraph_produced;
         std::set<size_t> subgraph_consumed;
+        std::vector<size_t> final_output_ops;
         for (size_t const op_idx : subgraph.ops) {
             if (op_idx >= problem.ops.size()) {
                 return absl::InvalidArgumentError(
@@ -577,6 +723,39 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             subgraph_produced.insert(out);
             for (size_t const in : problem.ops[op_idx].inputs) {
                 subgraph_consumed.insert(in);
+            }
+        }
+
+        for (size_t const op_idx : subgraph.ops) {
+            size_t const out = problem.ops[op_idx].outputs[0];
+            if (!subgraph_consumed.contains(out)) {
+                final_output_ops.push_back(op_idx);
+            }
+        }
+
+        if (!final_output_ops.empty()) {
+            size_t const reference_op_idx = final_output_ops[0];
+            size_t const reference_output_idx = problem.ops[reference_op_idx].outputs[0];
+            Tensor const reference_shape = problem.tensors[reference_output_idx];
+            const OpType& reference_op_type = problem.ops[reference_op_idx].op_type;
+
+            if (reference_op_type == "Pointwise" && subgraph.granularity.depth != 1) {
+                return absl::InvalidArgumentError(
+                    "[Invalid Subgraph Outputs] Pointwise final output requires k=1");
+            }
+
+            for (size_t const op_idx : final_output_ops) {
+                size_t const output_idx = problem.ops[op_idx].outputs[0];
+                if (problem.tensors[output_idx] != reference_shape) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Subgraph Outputs] Final output tensors must have identical "
+                        "dimensions");
+                }
+                if (problem.ops[op_idx].op_type != reference_op_type) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Subgraph Outputs] Final output operations must have the same "
+                        "type");
+                }
             }
         }
 
@@ -737,37 +916,26 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 }
 
 auto WriteSolution(const Solution& solution, const std::string& filename) -> Status {
-    ordered_json j;
+    return WriteSolutionJsonToPath(SolutionToJson(solution), std::filesystem::path(filename));
+}
 
-    j["subgraphs"] = ordered_json::array();
-    j["granularities"] = ordered_json::array();
-    j["tensors_to_retain"] = ordered_json::array();
-    j["traversal_orders"] = ordered_json::array();
-    j["subgraph_latencies"] = ordered_json::array();
+auto WriteSolutionAtomically(const Solution& solution, const std::string& filename) -> Status {
+    std::filesystem::path const output_path(filename);
+    std::filesystem::path const temp_path = MakeTemporarySolutionPath(output_path);
 
-    for (const auto& sg : solution.subgraphs) {
-        j["subgraphs"].push_back(sg.ops);
-        j["granularities"].push_back(
-            {sg.granularity.width, sg.granularity.height, sg.granularity.depth});
-        j["tensors_to_retain"].push_back(sg.tensors_to_retain);
-
-        if (sg.traversal_order.has_value()) {
-            j["traversal_orders"].push_back(sg.traversal_order.value());
-        } else {
-            j["traversal_orders"].push_back(nullptr);
-        }
-
-        j["subgraph_latencies"].push_back(sg.subgraph_latency);
+    auto write_status = WriteSolutionJsonToPath(SolutionToJson(solution), temp_path);
+    if (!write_status.ok()) {
+        return write_status;
     }
 
-    // Write to file with a 2-space indentation for readability
-    std::ofstream out_file(filename);
-    if (!out_file.is_open()) {
-        return absl::NotFoundError("Failed to open output file: " + filename);
+    std::error_code rename_error;
+    std::filesystem::rename(temp_path, output_path, rename_error);
+    if (rename_error) {
+        std::error_code remove_error;
+        std::filesystem::remove(temp_path, remove_error);
+        return absl::InternalError("Failed to atomically replace output file: " +
+                                   rename_error.message());
     }
-
-    out_file << j.dump(2) << '\n';
-    out_file.close();
 
     return absl::OkStatus();
 }

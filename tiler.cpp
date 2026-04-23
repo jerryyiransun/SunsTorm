@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <functional>
+#ifdef DEBUG
+#include <iostream>
+#endif
 #include <limits>
 #include <optional>
 #include <set>
@@ -17,7 +20,7 @@ namespace mlsys {
 
 namespace {
 
-// The current tiler search space mirrors the old greedy shrink path:
+// BruteForceTiler's legacy search space mirrors the old greedy shrink path:
 // start from the native granularity and repeatedly halve dimensions.
 auto HalvingCandidates(int64_t start) -> std::vector<int64_t> {
     std::vector<int64_t> candidates;
@@ -34,6 +37,26 @@ auto HalvingCandidates(int64_t start) -> std::vector<int64_t> {
     return candidates;
 }
 
+// Builds descending ceil(D / n) tile sizes, capped to the hardware/native limit.
+auto CandidateTileSizes(int64_t dimension, int64_t cap) -> std::vector<int64_t> {
+    dimension = std::max<int64_t>(1, dimension);
+    cap = std::max<int64_t>(1, cap);
+
+    std::vector<int64_t> candidates;
+    for (int64_t tile_count = 1; tile_count <= dimension; ++tile_count) {
+        int64_t const tile_size = std::min<int64_t>(cap, (dimension + tile_count - 1) / tile_count);
+        if (candidates.empty() || candidates.back() != tile_size) {
+            candidates.push_back(tile_size);
+        }
+    }
+
+    if (candidates.empty()) {
+        candidates.push_back(1);
+    }
+    return candidates;
+}
+
+// Builds descending exact-divisor candidates for the cost-guided tiler.
 auto DivisorCandidates(int64_t value, int64_t cap) -> std::vector<int64_t> {
     value = std::max<int64_t>(1, value);
     cap = std::max<int64_t>(1, cap);
@@ -60,27 +83,30 @@ auto DivisorCandidates(int64_t value, int64_t cap) -> std::vector<int64_t> {
     return candidates;
 }
 
-auto MaxMatMulDepth(const Problem& problem, const Subgraph& subgraph) -> int64_t {
-    int64_t max_depth = 1;
+// Finds the split-k depth that can affect final MatMul outputs of a subgraph.
+auto FinalMatMulDepth(const Problem& problem, const Subgraph& subgraph) -> std::optional<int64_t> {
+    std::set<size_t> consumed;
     for (size_t op_idx : subgraph.ops) {
-        if (problem.ops[op_idx].op_type != "MatMul") {
+        for (size_t input_idx : problem.ops[op_idx].inputs) {
+            consumed.insert(input_idx);
+        }
+    }
+
+    std::optional<int64_t> max_depth;
+    for (size_t op_idx : subgraph.ops) {
+        const Op& op = problem.ops[op_idx];
+        if (op.op_type != "MatMul" || consumed.contains(op.outputs[0])) {
             continue;
         }
-        size_t lhs_idx = problem.ops[op_idx].inputs[0];
-        max_depth = std::max<int64_t>(max_depth, problem.tensors[lhs_idx].width);
+
+        int64_t const depth = problem.tensors[op.inputs[0]].width;
+        max_depth = max_depth.has_value() ? std::max(max_depth.value(), depth) : depth;
     }
+
     return max_depth;
 }
 
-auto HasMatMul(const Problem& problem, const Subgraph& subgraph) -> bool {
-    for (size_t op_idx : subgraph.ops) {
-        if (problem.ops[op_idx].op_type == "MatMul") {
-            return true;
-        }
-    }
-    return false;
-}
-
+// Returns the largest final-output shape that defines the subgraph tile grid.
 auto MaxFinalOutputShape(const Problem& problem, const Subgraph& subgraph) -> Tensor {
     std::set<size_t> produced;
     std::set<size_t> consumed;
@@ -113,6 +139,7 @@ auto MaxFinalOutputShape(const Problem& problem, const Subgraph& subgraph) -> Te
     return shape;
 }
 
+// Maps each produced tensor to the op that creates it.
 auto BuildProducerMap(const Problem& problem) -> std::vector<int> {
     std::vector<int> producer(problem.tensors.size(), -1);
     for (size_t op_idx = 0; op_idx < problem.ops.size(); ++op_idx) {
@@ -121,6 +148,7 @@ auto BuildProducerMap(const Problem& problem) -> std::vector<int> {
     return producer;
 }
 
+// Builds a snake traversal order over the final-output tile grid.
 auto BuildSnakeTraversalOrder(const Problem& problem, const Subgraph& subgraph)
     -> std::optional<TraversalOrder> {
     std::set<size_t> subgraph_produced;
@@ -293,6 +321,44 @@ struct CostGuidedDivisorState {
     size_t depth_idx = 0;
 };
 
+#ifdef DEBUG
+// Prints a compact vector representation for debug traces.
+template <typename T> void DebugPrintVector(const std::vector<T>& values) {
+    std::cout << "[";
+    for (size_t idx = 0; idx < values.size(); ++idx) {
+        if (idx > 0) {
+            std::cout << ", ";
+        }
+        std::cout << values[idx];
+    }
+    std::cout << "]";
+}
+
+// Prints a granularity tuple for debug traces.
+void DebugPrintGranularity(const Granularity& granularity) {
+    std::cout << "{w=" << granularity.width << ", h=" << granularity.height
+              << ", k=" << granularity.depth << "}";
+}
+
+// Prints candidate indices plus the corresponding granularity for debug traces.
+void DebugPrintState(const CostGuidedDivisorState& state, const Granularity& granularity) {
+    std::cout << "{idx_w=" << state.width_idx << ", idx_h=" << state.height_idx
+              << ", idx_k=" << state.depth_idx << ", granularity=";
+    DebugPrintGranularity(granularity);
+    std::cout << "}";
+}
+
+// Prints an optional candidate latency for debug traces.
+void DebugPrintOptionalCost(const std::optional<double>& cost) {
+    if (!cost.has_value()) {
+        std::cout << "unavailable";
+        return;
+    }
+    std::cout << cost.value();
+}
+#endif
+
+// Converts candidate-list indices into the concrete granularity they select.
 auto GranularityFromState(const std::vector<int64_t>& width_candidates,
                           const std::vector<int64_t>& height_candidates,
                           const std::vector<int64_t>& depth_candidates,
@@ -302,6 +368,7 @@ auto GranularityFromState(const std::vector<int64_t>& width_candidates,
             .depth = depth_candidates[state.depth_idx]};
 }
 
+// Advances the next spatial candidate, preferring the currently larger spatial side.
 auto NextSpatialState(const std::vector<int64_t>& width_candidates,
                       const std::vector<int64_t>& height_candidates,
                       const std::vector<int64_t>& depth_candidates,
@@ -337,6 +404,7 @@ auto NextSpatialState(const std::vector<int64_t>& width_candidates,
     return std::nullopt;
 }
 
+// Advances the split-k candidate by one step when another depth candidate exists.
 auto NextDepthState(const std::vector<int64_t>& depth_candidates,
                     const CostGuidedDivisorState& state) -> std::optional<CostGuidedDivisorState> {
     if (state.depth_idx + 1 >= depth_candidates.size()) {
@@ -348,6 +416,7 @@ auto NextDepthState(const std::vector<int64_t>& depth_candidates,
     return next;
 }
 
+// Applies a granularity and refreshes the matching traversal order.
 void ApplyGranularityAndTraversal(const Problem& problem, Solution& solution, size_t sg_idx,
                                   const Granularity& granularity) {
     Subgraph& subgraph = solution.subgraphs[sg_idx];
@@ -355,6 +424,7 @@ void ApplyGranularityAndTraversal(const Problem& problem, Solution& solution, si
     subgraph.traversal_order = BuildSnakeTraversalOrder(problem, subgraph);
 }
 
+// Estimates a candidate subgraph latency, returning nullopt if the cost model rejects it.
 auto EstimateCandidateLatency(const Problem& problem, const Solution& solution, size_t sg_idx,
                               const std::set<size_t>& prev_retained_tensors, CostModel& cost_model,
                               const Granularity& granularity) -> std::optional<double> {
@@ -364,11 +434,18 @@ auto EstimateCandidateLatency(const Problem& problem, const Solution& solution, 
     auto latency =
         cost_model.estimate_subgraph_latency(candidate_solution, sg_idx, prev_retained_tensors);
     if (!latency.ok()) {
+#ifdef DEBUG
+        std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx
+                  << " candidate cost unavailable for ";
+        DebugPrintGranularity(granularity);
+        std::cout << ": " << latency.status().message() << "\n";
+#endif
         return std::nullopt;
     }
     return latency.value();
 }
 
+// Tiles one subgraph by comparing divisor-based spatial and split-k candidates.
 auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& solution, size_t sg_idx,
                                         const std::set<size_t>& prev_retained_tensors,
                                         const std::vector<int>& producer_op, CostModel& cost_model)
@@ -380,61 +457,196 @@ auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& soluti
         DivisorCandidates(output_shape.width, problem.native_granularity.width);
     std::vector<int64_t> height_candidates =
         DivisorCandidates(output_shape.height, problem.native_granularity.height);
+    std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, subgraph);
     std::vector<int64_t> depth_candidates =
-        HasMatMul(problem, subgraph) ? DivisorCandidates(MaxMatMulDepth(problem, subgraph),
-                                                         MaxMatMulDepth(problem, subgraph))
-                                     : std::vector<int64_t>{1};
+        final_matmul_depth.has_value()
+            ? DivisorCandidates(final_matmul_depth.value(), problem.native_granularity.depth)
+            : std::vector<int64_t>{1};
+
+#ifdef DEBUG
+    std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " begin\n";
+    std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " ops=";
+    DebugPrintVector(subgraph.ops);
+    std::cout << ", output_shape={w=" << output_shape.width << ", h=" << output_shape.height
+              << "}, depth_affects_split_k=" << (final_matmul_depth.has_value() ? "true" : "false")
+              << ", prev_retained=";
+    DebugPrintVector(
+        std::vector<size_t>(prev_retained_tensors.begin(), prev_retained_tensors.end()));
+    std::cout << "\n";
+    std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " width_candidates=";
+    DebugPrintVector(width_candidates);
+    std::cout << ", height_candidates=";
+    DebugPrintVector(height_candidates);
+    std::cout << ", depth_candidates=";
+    DebugPrintVector(depth_candidates);
+    std::cout << "\n";
+#endif
 
     CostGuidedDivisorState state;
+#ifdef DEBUG
+    int64_t step = 0;
+#endif
 
     while (true) {
         Granularity const current =
             GranularityFromState(width_candidates, height_candidates, depth_candidates, state);
         ApplyGranularityAndTraversal(problem, solution, sg_idx, current);
 
-        if (FitsFastMemory(problem, solution, sg_idx, prev_retained_tensors, producer_op)) {
+#ifdef DEBUG
+        std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                  << " current=";
+        DebugPrintState(state, current);
+        std::cout << "\n";
+#endif
+
+        bool const fits_fast_memory =
+#ifdef DEBUG
+            DebugSubgraphFitsFastMemory(problem, solution, sg_idx, prev_retained_tensors,
+                                        producer_op);
+#else
+            FitsFastMemory(problem, solution, sg_idx, prev_retained_tensors, producer_op);
+#endif
+#ifdef DEBUG
+        std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                  << " fits_fast_memory=" << (fits_fast_memory ? "true" : "false") << "\n";
+#endif
+
+        if (fits_fast_memory) {
             auto current_latency =
                 cost_model.estimate_subgraph_latency(solution, sg_idx, prev_retained_tensors);
             if (current_latency.ok()) {
+#ifdef DEBUG
+                std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step "
+                          << step << " accepted ";
+                DebugPrintGranularity(current);
+                std::cout << " with exact_cost=" << current_latency.value() << "\n";
+#endif
                 return absl::OkStatus();
             }
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " current cost unavailable despite fitting: "
+                      << current_latency.status().message() << "\n";
+#endif
         }
 
         std::optional<CostGuidedDivisorState> spatial_state =
             NextSpatialState(width_candidates, height_candidates, depth_candidates, state);
         std::optional<CostGuidedDivisorState> depth_state = NextDepthState(depth_candidates, state);
 
-        std::optional<double> spatial_latency;
-        if (spatial_state.has_value()) {
-            spatial_latency = EstimateCandidateLatency(
-                problem, solution, sg_idx, prev_retained_tensors, cost_model,
-                GranularityFromState(width_candidates, height_candidates, depth_candidates,
-                                     *spatial_state));
+        if (!spatial_state.has_value() && !depth_state.has_value()) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " terminating: no shrink candidate remains\n";
+#endif
+            return absl::ResourceExhaustedError("Cannot fit working set even at minimum tile size");
         }
+
+        if (spatial_state.has_value() && !depth_state.has_value()) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " choose spatial shrink because it is the only remaining move\n";
+#endif
+            state = *spatial_state;
+#ifdef DEBUG
+            ++step;
+#endif
+            continue;
+        }
+
+        if (!spatial_state.has_value() && depth_state.has_value()) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " choose depth shrink because it is the only remaining move\n";
+#endif
+            state = *depth_state;
+#ifdef DEBUG
+            ++step;
+#endif
+            continue;
+        }
+
+        std::optional<double> spatial_latency;
+        spatial_latency =
+            EstimateCandidateLatency(problem, solution, sg_idx, prev_retained_tensors, cost_model,
+                                     GranularityFromState(width_candidates, height_candidates,
+                                                          depth_candidates, *spatial_state));
 
         std::optional<double> depth_latency;
-        if (depth_state.has_value()) {
-            depth_latency = EstimateCandidateLatency(
-                problem, solution, sg_idx, prev_retained_tensors, cost_model,
-                GranularityFromState(width_candidates, height_candidates, depth_candidates,
-                                     *depth_state));
+        depth_latency =
+            EstimateCandidateLatency(problem, solution, sg_idx, prev_retained_tensors, cost_model,
+                                     GranularityFromState(width_candidates, height_candidates,
+                                                          depth_candidates, *depth_state));
+
+#ifdef DEBUG
+        std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                  << " next spatial=";
+        if (spatial_state.has_value()) {
+            DebugPrintState(*spatial_state,
+                            GranularityFromState(width_candidates, height_candidates,
+                                                 depth_candidates, *spatial_state));
+        } else {
+            std::cout << "none";
         }
+        std::cout << ", spatial_cost=";
+        DebugPrintOptionalCost(spatial_latency);
+        std::cout << "; next depth=";
+        if (depth_state.has_value()) {
+            DebugPrintState(*depth_state, GranularityFromState(width_candidates, height_candidates,
+                                                               depth_candidates, *depth_state));
+        } else {
+            std::cout << "none";
+        }
+        std::cout << ", depth_cost=";
+        DebugPrintOptionalCost(depth_latency);
+        std::cout << "\n";
+#endif
 
         if (!spatial_latency.has_value() && !depth_latency.has_value()) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " terminating: no shrink candidate has an exact cost\n";
+#endif
             return absl::ResourceExhaustedError("Cannot fit working set even at minimum tile size");
         }
 
         if (depth_latency.has_value() &&
             (!spatial_latency.has_value() || depth_latency.value() < spatial_latency.value())) {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " choose depth shrink because depth_cost=" << depth_latency.value();
+            if (spatial_latency.has_value()) {
+                std::cout << " < spatial_cost=" << spatial_latency.value();
+            } else {
+                std::cout << " and spatial_cost is unavailable";
+            }
+            std::cout << "\n";
+#endif
             state = *depth_state;
         } else {
+#ifdef DEBUG
+            std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " step " << step
+                      << " choose spatial shrink";
+            if (spatial_latency.has_value() && depth_latency.has_value()) {
+                std::cout << " because spatial_cost=" << spatial_latency.value()
+                          << " <= depth_cost=" << depth_latency.value();
+            } else if (spatial_latency.has_value()) {
+                std::cout << " because depth_cost is unavailable and spatial_cost="
+                          << spatial_latency.value();
+            }
+            std::cout << "\n";
+#endif
             state = *spatial_state;
         }
+#ifdef DEBUG
+        ++step;
+#endif
     }
 }
 
 } // namespace
 
+// Exhaustively searches the legacy halving candidate space for each subgraph.
 auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> {
     Solution tiled_solution = solution;
     std::vector<int> producer_op = BuildProducerMap(problem);
@@ -460,14 +672,12 @@ auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> 
         std::vector<int64_t> width_candidates = HalvingCandidates(problem.native_granularity.width);
         std::vector<int64_t> height_candidates =
             HalvingCandidates(problem.native_granularity.height);
-        std::vector<int64_t> depth_candidates = HalvingCandidates(MaxMatMulDepth(problem, sg));
-        bool has_matmul = false;
-        for (size_t op_idx : sg.ops) {
-            if (problem.ops[op_idx].op_type == "MatMul") {
-                has_matmul = true;
-                break;
-            }
-        }
+        std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, sg);
+        std::vector<int64_t> depth_candidates =
+            final_matmul_depth.has_value()
+                ? HalvingCandidates(
+                      std::min(final_matmul_depth.value(), problem.native_granularity.depth))
+                : std::vector<int64_t>{1};
 
         Granularity best_granularity{.width = 0, .height = 0, .depth = 0};
         double best_score = std::numeric_limits<double>::infinity();
@@ -476,10 +686,6 @@ auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> 
         for (int64_t width : width_candidates) {
             for (int64_t height : height_candidates) {
                 for (int64_t depth : depth_candidates) {
-                    if (depth != 1 && !has_matmul) {
-                        continue;
-                    }
-
                     sg.granularity = {.width = width, .height = height, .depth = depth};
                     if (!FitsFastMemory(problem, tiled_solution, sg_idx, prev_retained_tensors,
                                         producer_op)) {
@@ -512,6 +718,7 @@ auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> 
     return tiled_solution;
 }
 
+// Greedily walks ceil-based tile candidates until each subgraph fits fast memory.
 auto GreedyTiler::tile(const Problem& problem, const Solution& solution) -> StatusOr<Solution> {
     Solution tiled_solution = solution;
     std::vector<int> producer_op = BuildProducerMap(problem);
@@ -519,33 +726,75 @@ auto GreedyTiler::tile(const Problem& problem, const Solution& solution) -> Stat
 
     for (size_t sg_idx = 0; sg_idx < tiled_solution.subgraphs.size(); ++sg_idx) {
         auto& sg = tiled_solution.subgraphs[sg_idx];
-        sg.granularity.width = problem.native_granularity.width;
-        sg.granularity.height = problem.native_granularity.height;
-        sg.granularity.depth = MaxMatMulDepth(problem, sg);
+        Tensor const output_shape = MaxFinalOutputShape(problem, sg);
+        std::vector<int64_t> width_candidates =
+            CandidateTileSizes(output_shape.width, problem.native_granularity.width);
+        std::vector<int64_t> height_candidates =
+            CandidateTileSizes(output_shape.height, problem.native_granularity.height);
+        std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, sg);
+        std::vector<int64_t> depth_candidates =
+            final_matmul_depth.has_value()
+                ? CandidateTileSizes(final_matmul_depth.value(), problem.native_granularity.depth)
+                : std::vector<int64_t>{1};
 
-        while (
-            !FitsFastMemory(problem, tiled_solution, sg_idx, prev_retained_tensors, producer_op)) {
-            int64_t const w = sg.granularity.width;
-            int64_t const h = sg.granularity.height;
-            int64_t const k = sg.granularity.depth;
-            int64_t const max_dim = std::max({w, h, k});
+        CostGuidedDivisorState state;
 
-            if (max_dim <= 1) {
+        while (true) {
+            Granularity const current =
+                GranularityFromState(width_candidates, height_candidates, depth_candidates, state);
+            ApplyGranularityAndTraversal(problem, tiled_solution, sg_idx, current);
+
+            if (FitsFastMemory(problem, tiled_solution, sg_idx, prev_retained_tensors,
+                               producer_op)) {
+                break;
+            }
+
+            enum class CandidateDimension {
+                kDepth,
+                kWidth,
+                kHeight,
+            };
+
+            std::optional<CandidateDimension> dimension_to_advance;
+            int64_t best_dimension_size = 0;
+            auto consider_dimension = [&](CandidateDimension dimension, int64_t current_size,
+                                          bool can_advance) {
+                if (!can_advance) {
+                    return;
+                }
+                if (!dimension_to_advance.has_value() || current_size > best_dimension_size) {
+                    dimension_to_advance = dimension;
+                    best_dimension_size = current_size;
+                }
+            };
+
+            // Tie order is depth, then width, then height because equal sizes keep the
+            // first considered dimension.
+            consider_dimension(CandidateDimension::kDepth, current.depth,
+                               state.depth_idx + 1 < depth_candidates.size());
+            consider_dimension(CandidateDimension::kWidth, current.width,
+                               state.width_idx + 1 < width_candidates.size());
+            consider_dimension(CandidateDimension::kHeight, current.height,
+                               state.height_idx + 1 < height_candidates.size());
+
+            if (!dimension_to_advance.has_value()) {
                 return absl::ResourceExhaustedError(
                     "Cannot fit working set even at minimum tile size");
             }
 
-            // Match the previous strategy: always shrink the largest active dimension.
-            if (k == max_dim) {
-                sg.granularity.depth = (k + 1) / 2;
-            } else if (w == max_dim) {
-                sg.granularity.width = (w + 1) / 2;
-            } else {
-                sg.granularity.height = (h + 1) / 2;
+            switch (dimension_to_advance.value()) {
+            case CandidateDimension::kDepth:
+                ++state.depth_idx;
+                break;
+            case CandidateDimension::kWidth:
+                ++state.width_idx;
+                break;
+            case CandidateDimension::kHeight:
+                ++state.height_idx;
+                break;
             }
         }
 
-        sg.traversal_order = BuildSnakeTraversalOrder(problem, sg);
         prev_retained_tensors =
             std::set<size_t>(sg.tensors_to_retain.begin(), sg.tensors_to_retain.end());
     }
@@ -553,6 +802,7 @@ auto GreedyTiler::tile(const Problem& problem, const Solution& solution) -> Stat
     return tiled_solution;
 }
 
+// Tiles every subgraph with the cost-guided divisor search.
 auto CostGuidedDivisorTiler::tile(const Problem& problem, const Solution& solution)
     -> StatusOr<Solution> {
     Solution tiled_solution = solution;
@@ -575,6 +825,7 @@ auto CostGuidedDivisorTiler::tile(const Problem& problem, const Solution& soluti
     return tiled_solution;
 }
 
+// Retiles a single subgraph with the cost-guided divisor search.
 auto CostGuidedDivisorTiler::tile_subgraph(const Problem& problem, const Solution& solution,
                                            size_t sg_idx) -> StatusOr<Solution> {
     if (sg_idx >= solution.subgraphs.size()) {
