@@ -23,7 +23,7 @@ auto main(int argc, char* argv[]) -> int {
     }
     const Problem& problem = problem_status.value();
 
-    std::unique_ptr<Solver> solver = std::make_unique<HeuristicSolver>();
+    std::unique_ptr<Solver> solver = std::make_unique<HeuristicSolver>(output_path);
     auto solution_status = solver->solve(problem);
     if (!solution_status.ok()) {
         std::cerr << "Error solving problem: " << solution_status.status().message() << "\n";

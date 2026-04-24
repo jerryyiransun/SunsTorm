@@ -83,7 +83,7 @@ auto BuildSolver(SolverKind kind, const std::string& output_path) -> std::unique
     case SolverKind::kBase:
         return std::make_unique<BaseSolver>();
     case SolverKind::kHeuristic:
-        return std::make_unique<HeuristicSolver>();
+        return std::make_unique<HeuristicSolver>(output_path);
     case SolverKind::kBruteForce:
         return std::make_unique<BruteForceSolver>();
     }
