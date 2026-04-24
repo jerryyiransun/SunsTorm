@@ -331,6 +331,14 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
 #endif
     }
 
+    auto max_spatial_tile_shape = [&](size_t tensor_idx) {
+        const Tensor& tensor = problem.tensors[tensor_idx];
+        return Tensor{
+            .width = std::min<Width>(subgraph.granularity.width, tensor.width),
+            .height = std::min<Height>(subgraph.granularity.height, tensor.height),
+        };
+    };
+
     for (size_t const t_idx : subgraph_produced) {
         bool const is_final_output = (!subgraph_consumed.contains(t_idx));
         if (!is_final_output) {
@@ -338,8 +346,9 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
         }
 
         final_output_tensors.insert(t_idx);
+        Tensor tensor = max_spatial_tile_shape(t_idx);
         if (!queued_tensors.contains(t_idx)) {
-            size_t const required_size = subgraph.granularity.width * subgraph.granularity.height;
+            size_t const required_size = tensor.width * tensor.height;
             fast_memory_usage += required_size;
             queued_tensors.insert(t_idx);
 #ifdef DEBUG
@@ -350,10 +359,6 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
 #endif
         }
 
-        Tensor tensor{
-            .width = subgraph.granularity.width,
-            .height = subgraph.granularity.height,
-        };
         q.emplace_back(t_idx, tensor, true);
     }
 
@@ -367,14 +372,22 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
         return req_tensor.width == problem.tensors[tensor_idx].width &&
                req_tensor.height == problem.tensors[tensor_idx].height;
     };
+    auto clip_requirement = [&](size_t tensor_idx, const Tensor& req_tensor) {
+        const Tensor& tensor = problem.tensors[tensor_idx];
+        return Tensor{
+            .width = std::min<Width>(req_tensor.width, tensor.width),
+            .height = std::min<Height>(req_tensor.height, tensor.height),
+        };
+    };
     auto add_requirement_usage = [&](size_t tensor_idx, const Tensor& req_tensor, bool is_ephemeral,
                                      bool is_retained) {
         if (is_ephemeral || is_retained) {
             return size_t{0};
         }
 
-        size_t const required_size = req_tensor.width * req_tensor.height;
-        bool const is_full = is_full_requirement(tensor_idx, req_tensor);
+        Tensor const clipped_req_tensor = clip_requirement(tensor_idx, req_tensor);
+        size_t const required_size = clipped_req_tensor.width * clipped_req_tensor.height;
+        bool const is_full = is_full_requirement(tensor_idx, clipped_req_tensor);
         if (full_counted_tensors.contains(tensor_idx)) {
             return size_t{0};
         }
@@ -700,6 +713,17 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
     std::cout << "[DEBUG] All assertions passed\n";
 #endif
 
+    // Identify tensors that are not produced by any op
+    std::vector<int> producer_op(
+        problem.tensors.size(), -1); // producer_op[i] is the index of the op that produces tensor i
+    std::vector<bool> produced_outputs(problem.tensors.size(), false);
+    for (size_t i = 0; i < problem.ops.size(); ++i) {
+        size_t const out = problem.ops[i].outputs[0];
+        inputs_satisfied_global[out] =
+            false; // produced tensors are unavailable until a valid subgraph completes
+        producer_op[out] = i;
+    }
+
     // Validate solution-level fields up-front. Problem-level checks should use assertions;
     // malformed solutions should return errors.
     for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
@@ -710,15 +734,24 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             return absl::InvalidArgumentError(
                 "[Invalid Granularity] Subgraph granularity dimensions must be positive");
         }
+        if (subgraph.granularity.width > problem.native_granularity.width ||
+            subgraph.granularity.height > problem.native_granularity.height ||
+            subgraph.granularity.depth > problem.native_granularity.depth) {
+            return absl::InvalidArgumentError(
+                "[Invalid Granularity] Subgraph granularity dimensions cannot exceed native "
+                "granularity");
+        }
 
         std::set<size_t> subgraph_produced;
         std::set<size_t> subgraph_consumed;
+        std::set<size_t> subgraph_ops;
         std::vector<size_t> final_output_ops;
         for (size_t const op_idx : subgraph.ops) {
             if (op_idx >= problem.ops.size()) {
                 return absl::InvalidArgumentError(
                     "[Invalid Op Index] Invalid op index in subgraph");
             }
+            subgraph_ops.insert(op_idx);
             size_t const out = problem.ops[op_idx].outputs[0];
             subgraph_produced.insert(out);
             for (size_t const in : problem.ops[op_idx].inputs) {
@@ -735,22 +768,9 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 
         if (!final_output_ops.empty()) {
             size_t const reference_op_idx = final_output_ops[0];
-            size_t const reference_output_idx = problem.ops[reference_op_idx].outputs[0];
-            Tensor const reference_shape = problem.tensors[reference_output_idx];
             const OpType& reference_op_type = problem.ops[reference_op_idx].op_type;
 
-            if (reference_op_type == "Pointwise" && subgraph.granularity.depth != 1) {
-                return absl::InvalidArgumentError(
-                    "[Invalid Subgraph Outputs] Pointwise final output requires k=1");
-            }
-
             for (size_t const op_idx : final_output_ops) {
-                size_t const output_idx = problem.ops[op_idx].outputs[0];
-                if (problem.tensors[output_idx] != reference_shape) {
-                    return absl::InvalidArgumentError(
-                        "[Invalid Subgraph Outputs] Final output tensors must have identical "
-                        "dimensions");
-                }
                 if (problem.ops[op_idx].op_type != reference_op_type) {
                     return absl::InvalidArgumentError(
                         "[Invalid Subgraph Outputs] Final output operations must have the same "
@@ -763,6 +783,63 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
             if (t_idx >= problem.tensors.size()) {
                 return absl::InvalidArgumentError(
                     "[Invalid Retained Tensor] Invalid tensor index in tensors_to_retain");
+            }
+            if (!subgraph_produced.contains(t_idx)) {
+                return absl::InvalidArgumentError(
+                    "[Invalid Retained Tensor] tensors_to_retain entries must be produced by the "
+                    "same subgraph");
+            }
+        }
+
+        for (size_t const op_idx : subgraph.ops) {
+            const Op& op = problem.ops[op_idx];
+            if (op.op_type != "MatMul") {
+                continue;
+            }
+
+            int64_t const full_k = problem.tensors[op.inputs[0]].width;
+            if (subgraph.granularity.depth > full_k) {
+                return absl::InvalidArgumentError(
+                    "[Invalid Granularity] MatMul granularity depth cannot exceed reduction "
+                    "dimension");
+            }
+
+            for (size_t input_pos = 0; input_pos < op.inputs.size(); ++input_pos) {
+                size_t const input_tensor_idx = op.inputs[input_pos];
+                if (input_tensor_idx >= producer_op.size() || producer_op[input_tensor_idx] < 0) {
+                    continue;
+                }
+
+                size_t const producer_idx = static_cast<size_t>(producer_op[input_tensor_idx]);
+                if (!subgraph_ops.contains(producer_idx) ||
+                    problem.ops[producer_idx].op_type != "Pointwise") {
+                    continue;
+                }
+
+                if (input_pos == 0 &&
+                    subgraph.granularity.width < problem.tensors[input_tensor_idx].width) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Split-K] Pointwise-produced MatMul LHS must cover the full K "
+                        "axis");
+                }
+                if (input_pos == 0 &&
+                    subgraph.granularity.height < problem.tensors[input_tensor_idx].height) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Split-K] Pointwise-produced MatMul LHS must fit within one "
+                        "spatial tile");
+                }
+                if (input_pos == 1 &&
+                    subgraph.granularity.height < problem.tensors[input_tensor_idx].height) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Split-K] Pointwise-produced MatMul RHS must cover the full K "
+                        "axis");
+                }
+                if (input_pos == 1 &&
+                    subgraph.granularity.width < problem.tensors[input_tensor_idx].width) {
+                    return absl::InvalidArgumentError(
+                        "[Invalid Split-K] Pointwise-produced MatMul RHS must fit within one "
+                        "spatial tile");
+                }
             }
         }
 
@@ -781,23 +858,25 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
                     "[Invalid Traversal Order] Subgraph has no final output for traversal");
             }
 
-            auto tile_count_for_output = [&](size_t tensor_idx) -> int64_t {
+            auto tiles_w_for_output = [&](size_t tensor_idx) -> int64_t {
                 int64_t const out_w = problem.tensors[tensor_idx].width;
-                int64_t const out_h = problem.tensors[tensor_idx].height;
                 int64_t const gran_w = subgraph.granularity.width;
-                int64_t const gran_h = subgraph.granularity.height;
-                int64_t const tiles_w = (out_w + gran_w - 1) / gran_w;
-                int64_t const tiles_h = (out_h + gran_h - 1) / gran_h;
-                return tiles_w * tiles_h;
+                return (out_w + gran_w - 1) / gran_w;
             };
 
-            int64_t const expected_tiles = tile_count_for_output(final_outputs[0]);
+            auto tiles_h_for_output = [&](size_t tensor_idx) -> int64_t {
+                int64_t const out_h = problem.tensors[tensor_idx].height;
+                int64_t const gran_h = subgraph.granularity.height;
+                return (out_h + gran_h - 1) / gran_h;
+            };
+
+            int64_t expected_tiles_w = 0;
+            int64_t expected_tiles_h = 0;
             for (size_t const out_idx : final_outputs) {
-                if (tile_count_for_output(out_idx) != expected_tiles) {
-                    return absl::InvalidArgumentError(
-                        "[Invalid Traversal Order] Inconsistent final output tile counts");
-                }
+                expected_tiles_w = std::max(expected_tiles_w, tiles_w_for_output(out_idx));
+                expected_tiles_h = std::max(expected_tiles_h, tiles_h_for_output(out_idx));
             }
+            int64_t const expected_tiles = expected_tiles_w * expected_tiles_h;
 
             const auto& traversal_order = subgraph.traversal_order.value();
             if (traversal_order.size() != static_cast<size_t>(expected_tiles)) {
@@ -822,17 +901,6 @@ StatusOr<TotalLatency> Evaluate(const Problem& problem, const Solution& solution
 #ifdef DEBUG
     std::cout << "[DEBUG] All assertions passed\n";
 #endif
-
-    // Identify tensors that are not produced by any op
-    std::vector<int> producer_op(
-        problem.tensors.size(), -1); // producer_op[i] is the index of the op that produces tensor i
-    std::vector<bool> produced_outputs(problem.tensors.size(), false);
-    for (size_t i = 0; i < problem.ops.size(); ++i) {
-        size_t const out = problem.ops[i].outputs[0];
-        inputs_satisfied_global[out] =
-            false; // produced tensors are unavailable until a valid subgraph completes
-        producer_op[out] = i;
-    }
 
     TotalLatency total_latency = 0.0;
     std::set<size_t> prev_retained_tensors;

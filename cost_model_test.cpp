@@ -870,4 +870,203 @@ TEST(CostModelTest, RejectsGranularityDepthAboveNative) {
               std::string::npos);
 }
 
+TEST(CostModelTest, RejectsRetainedGraphInput) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 graph input
+        {.width = 128, .height = 128}, // t1 output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {0};
+    sg.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+
+    ASSERT_FALSE(estimated.ok());
+    EXPECT_NE(std::string(estimated.status().message()).find("tensors_to_retain"),
+              std::string::npos);
+}
+
+TEST(CostModelTest, RejectsRetentionPassThrough) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 input
+        {.width = 128, .height = 128}, // t1 produced and retained by sg0
+        {.width = 128, .height = 128}, // t2 produced by sg1
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg0;
+    sg0.ops = {0};
+    sg0.tensors_to_retain = {1};
+    sg0.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg0.traversal_order = std::nullopt;
+    sg0.subgraph_latency = 0.0;
+
+    mlsys::Subgraph sg1;
+    sg1.ops = {1};
+    sg1.tensors_to_retain = {1};
+    sg1.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg1.traversal_order = std::nullopt;
+    sg1.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg0, sg1}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+
+    ASSERT_FALSE(estimated.ok());
+    EXPECT_NE(std::string(estimated.status().message()).find("tensors_to_retain"),
+              std::string::npos);
+}
+
+TEST(CostModelTest, RejectsPointwiseProducedMatMulRhsWithoutFullKCoverage) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 128}, // t0 pointwise input
+        {.width = 64, .height = 128}, // t1 pointwise output, matmul rhs
+        {.width = 128, .height = 64}, // t2 matmul lhs
+        {.width = 64, .height = 64},  // t3 matmul output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+        {.op_type = "MatMul", .inputs = {2, 1}, .outputs = {3}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 64};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+
+    ASSERT_FALSE(estimated.ok());
+    EXPECT_NE(std::string(estimated.status().message()).find("full K axis"), std::string::npos);
+}
+
+TEST(CostModelTest, RejectsPointwiseProducedMatMulLhsThatSpansSpatialTiles) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 32, .height = 256},  // t0 op0 lhs
+        {.width = 32, .height = 32},   // t1 op0 rhs
+        {.width = 32, .height = 256},  // t2 op0 output
+        {.width = 32, .height = 256},  // t3 pointwise output, op2 lhs
+        {.width = 128, .height = 32},  // t4 op2 rhs
+        {.width = 128, .height = 256}, // t5 op2 output, taller than one native tile
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 1},
+        {.op_type = "MatMul", .inputs = {3, 4}, .outputs = {5}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 100;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1, 2};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 32};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+
+    ASSERT_FALSE(estimated.ok());
+    EXPECT_NE(std::string(estimated.status().message()).find("spatial tile"), std::string::npos);
+}
+
+TEST(CostModelTest, CanonicalGridMasksDifferentOutputShapes) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 256, .height = 128}, // t0 input of op0
+        {.width = 128, .height = 256}, // t1 input of op1
+        {.width = 256, .height = 128}, // t2 output of op0, 2x1 tiles
+        {.width = 128, .height = 256}, // t3 output of op1, 1x2 tiles
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {2}, .base_cost = 100},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {3}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 1'000'000'000;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg.traversal_order = mlsys::TraversalOrder{0, 1, 2, 3};
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+
+    ASSERT_TRUE(estimated.ok()) << estimated.status().message();
+    // Canonical 2x2 grid: tile 0 runs both ops, tile 1 only op0, tile 2 only op1,
+    // tile 3 is masked for both.
+    EXPECT_NEAR(std::get<1>(estimated.value()), 400.0, 1e-6);
+}
+
+TEST(CostModelTest, ClippedSpatialTailPaysFullGranuleCompute) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 192, .height = 128},
+        {.width = 192, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1000},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 1'000'000'000;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+
+    ASSERT_TRUE(estimated.ok()) << estimated.status().message();
+    EXPECT_NEAR(std::get<1>(estimated.value()), 2000.0, 1e-6);
+}
+
 } // namespace
