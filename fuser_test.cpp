@@ -338,7 +338,7 @@ TEST(FuserTest, AvoidsInvalidDestructiveMergeWhenProducerIsStillNeeded) {
     ExpectGreedySolutionValid(problem, *solution);
 }
 
-TEST(FuserTest, RetainCarriesTensorAcrossUnrelatedIntermediateSubgraph) {
+TEST(FuserTest, RetainDoesNotPassThroughUnrelatedIntermediateSubgraph) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 128, .height = 128}, {.width = 128, .height = 128}, {.width = 32, .height = 128},
@@ -361,12 +361,17 @@ TEST(FuserTest, RetainCarriesTensorAcrossUnrelatedIntermediateSubgraph) {
     ExpectGreedySolutionValid(problem, *solution);
 
     bool retained_through_unrelated_subgraph = false;
+    bool retained_by_producer = false;
     for (const auto& subgraph : solution->subgraphs) {
         bool const retains_tensor =
             std::find(subgraph.tensors_to_retain.begin(), subgraph.tensors_to_retain.end(), 1) !=
             subgraph.tensors_to_retain.end();
         if (!retains_tensor) {
             continue;
+        }
+
+        if (SubgraphProducesTensor(problem, subgraph, 1)) {
+            retained_by_producer = true;
         }
 
         bool const touches_tensor = SubgraphProducesTensor(problem, subgraph, 1) ||
@@ -377,7 +382,8 @@ TEST(FuserTest, RetainCarriesTensorAcrossUnrelatedIntermediateSubgraph) {
         }
     }
 
-    EXPECT_TRUE(retained_through_unrelated_subgraph) << FormatSolution(*solution);
+    EXPECT_TRUE(retained_by_producer) << FormatSolution(*solution);
+    EXPECT_FALSE(retained_through_unrelated_subgraph) << FormatSolution(*solution);
 }
 
 TEST(FuserTest, UsesExplicitTopologicalOrderForGeneratedSolution) {

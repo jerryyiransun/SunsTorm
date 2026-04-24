@@ -368,18 +368,32 @@ auto BuildSubgraphMeta(const Problem& problem, const Subgraph& subgraph,
     return meta;
 }
 
-// Returns explicit spatial traversal order for this subgraph.
-// If traversal is not provided, default row-major order is used.
-auto BuildTraversalOrder(const Problem& problem, const Subgraph& subgraph,
-                         size_t reference_output_tensor) -> absl::StatusOr<std::vector<int64_t>> {
-    int64_t const out_w = problem.tensors[reference_output_tensor].width;
-    int64_t const out_h = problem.tensors[reference_output_tensor].height;
+struct SpatialGrid {
+    int64_t tiles_w = 0;
+    int64_t tiles_h = 0;
+};
+
+auto BuildCanonicalSpatialGrid(const Problem& problem, const Subgraph& subgraph,
+                               const std::set<size_t>& final_outputs) -> SpatialGrid {
+    SpatialGrid grid;
     int64_t const gran_w = subgraph.granularity.width;
     int64_t const gran_h = subgraph.granularity.height;
 
-    int64_t const tiles_w = CeilDiv(out_w, gran_w);
-    int64_t const tiles_h = CeilDiv(out_h, gran_h);
-    int64_t const total_tiles = tiles_w * tiles_h;
+    for (size_t out_tensor_idx : final_outputs) {
+        int64_t const out_w = problem.tensors[out_tensor_idx].width;
+        int64_t const out_h = problem.tensors[out_tensor_idx].height;
+        grid.tiles_w = std::max(grid.tiles_w, CeilDiv(out_w, gran_w));
+        grid.tiles_h = std::max(grid.tiles_h, CeilDiv(out_h, gran_h));
+    }
+
+    return grid;
+}
+
+// Returns explicit spatial traversal order for this subgraph.
+// If traversal is not provided, default row-major order over the canonical grid is used.
+auto BuildTraversalOrder(const Subgraph& subgraph, const SpatialGrid& grid)
+    -> absl::StatusOr<std::vector<int64_t>> {
+    int64_t const total_tiles = grid.tiles_w * grid.tiles_h;
 
     if (!subgraph.traversal_order.has_value()) {
         std::vector<int64_t> order(static_cast<size_t>(total_tiles));
@@ -447,22 +461,11 @@ void AddLockedSplitKOutputs(const TilesByTensor& required_outputs,
 }
 
 // Computes retained full tensors that should survive into the next subgraph.
-auto BuildNextRetainedSet(const Problem& problem, const Subgraph& subgraph,
-                          const SubgraphMeta& meta, const std::set<size_t>& prev_retained)
-    -> std::set<size_t> {
+auto BuildNextRetainedSet(const Subgraph& subgraph, const SubgraphMeta& meta) -> std::set<size_t> {
     std::set<size_t> next;
 
     for (size_t t_idx : subgraph.tensors_to_retain) {
-        if (t_idx >= problem.tensors.size()) {
-            continue;
-        }
-
-        // We only retain tensors touched by this step context (consumed/produced/previously
-        // retained).
-        // Technically we could retain untouched tensors, but that would make no sense.
-        bool const touched = meta.consumed.contains(t_idx) || meta.produced.contains(t_idx) ||
-                             prev_retained.contains(t_idx);
-        if (touched) {
+        if (meta.produced.contains(t_idx)) {
             next.insert(t_idx);
         }
     }
@@ -638,10 +641,35 @@ auto ComputeStepComputeTime(const Problem& problem, const Subgraph& subgraph,
     for (const auto& [op_idx, req] : op_requirements) {
         const Op& op = problem.ops[op_idx];
 
-        // Non-overlapping output area this op contributes in current step.
-        int64_t const required_output_area = Tile::compute_non_overlapping_area(req.output_tiles);
-        if (required_output_area <= 0) {
+        std::set<std::tuple<size_t, int64_t, int64_t, int64_t, int64_t>> non_empty_output_tiles;
+        for (const Tile& tile : req.output_tiles) {
+            if (tile.area() <= 0) {
+                continue;
+            }
+            non_empty_output_tiles.insert(
+                std::make_tuple(tile.tensor_idx, tile.x0, tile.x1, tile.y0, tile.y1));
+        }
+
+        if (non_empty_output_tiles.empty()) {
             continue;
+        }
+
+        int64_t required_output_area = 0;
+        for (const auto& [tensor_idx, x0, x1, y0, y1] : non_empty_output_tiles) {
+            const Tensor& tensor = problem.tensors[tensor_idx];
+            bool const is_spatial_grid_tile =
+                (x0 % subgraph.granularity.width == 0) && (y0 % subgraph.granularity.height == 0) &&
+                (x1 == std::min<int64_t>(x0 + subgraph.granularity.width, tensor.width)) &&
+                (y1 == std::min<int64_t>(y0 + subgraph.granularity.height, tensor.height));
+
+            if (is_spatial_grid_tile) {
+                // A non-empty clipped edge tile still pays for the selected spatial granule.
+                required_output_area += subgraph.granularity.width * subgraph.granularity.height;
+            } else {
+                // Internal tiles created by split-K/chained MatMuls are reduction-derived slices,
+                // not padded spatial edge tiles, so they keep proportional compute.
+                required_output_area += (x1 - x0) * (y1 - y0);
+            }
         }
 
         int64_t full_k = 1;
@@ -875,7 +903,7 @@ auto CostModel::compute_retained_for_next_subgraph(
         return prev_retained_tensors;
     }
 
-    return BuildNextRetainedSet(problem_, subgraph, meta, prev_retained_tensors);
+    return BuildNextRetainedSet(subgraph, meta);
 }
 
 auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
@@ -898,6 +926,58 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
 
     // Classify tensor roles for this subgraph.
     SubgraphMeta meta = BuildSubgraphMeta(problem, subgraph, consumers_by_tensor_);
+
+    for (size_t t_idx : subgraph.tensors_to_retain) {
+        if (t_idx >= problem_.tensors.size()) {
+            return absl::InvalidArgumentError(
+                "CostModel: invalid tensor index in tensors_to_retain");
+        }
+        if (!meta.produced.contains(t_idx)) {
+            return absl::InvalidArgumentError(
+                "CostModel: tensors_to_retain entries must be produced by the same subgraph");
+        }
+    }
+
+    for (size_t op_idx : subgraph.ops) {
+        const Op& op = problem_.ops[op_idx];
+        if (op.op_type != "MatMul") {
+            continue;
+        }
+
+        for (size_t input_pos = 0; input_pos < op.inputs.size(); ++input_pos) {
+            size_t const input_tensor_idx = op.inputs[input_pos];
+            if (input_tensor_idx >= producer_op_.size() || producer_op_[input_tensor_idx] < 0) {
+                continue;
+            }
+
+            size_t const producer_idx = static_cast<size_t>(producer_op_[input_tensor_idx]);
+            if (!meta.op_set.contains(producer_idx) ||
+                problem_.ops[producer_idx].op_type != "Pointwise") {
+                continue;
+            }
+
+            if (input_pos == 0 &&
+                subgraph.granularity.width < problem_.tensors[input_tensor_idx].width) {
+                return absl::InvalidArgumentError(
+                    "CostModel: Pointwise-produced MatMul LHS must cover the full K axis");
+            }
+            if (input_pos == 0 &&
+                subgraph.granularity.height < problem_.tensors[input_tensor_idx].height) {
+                return absl::InvalidArgumentError(
+                    "CostModel: Pointwise-produced MatMul LHS must fit within one spatial tile");
+            }
+            if (input_pos == 1 &&
+                subgraph.granularity.height < problem_.tensors[input_tensor_idx].height) {
+                return absl::InvalidArgumentError(
+                    "CostModel: Pointwise-produced MatMul RHS must cover the full K axis");
+            }
+            if (input_pos == 1 &&
+                subgraph.granularity.width < problem_.tensors[input_tensor_idx].width) {
+                return absl::InvalidArgumentError(
+                    "CostModel: Pointwise-produced MatMul RHS must fit within one spatial tile");
+            }
+        }
+    }
 
     // Refine boundary outputs with schedule-aware recomputation behavior.
     // A final output tensor must escape only if:
@@ -922,35 +1002,14 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
         }
     }
 
-    // Choose one output tensor to define spatial tile grid dimensions.
-    // The estimator requires all final outputs to share the same tile count so a
-    // single traversal order can index all of them consistently.
-    size_t reference_output_tensor = 0;
-    if (!meta.final_outputs.empty()) {
-        reference_output_tensor = *meta.final_outputs.begin();
-    } else if (!meta.produced.empty()) {
-        reference_output_tensor = *meta.produced.begin();
-    } else {
+    if (meta.final_outputs.empty()) {
         return 0.0;
     }
 
-    int64_t const out_w = problem_.tensors[reference_output_tensor].width;
-    int64_t const out_h = problem_.tensors[reference_output_tensor].height;
-    int64_t const tiles_w = CeilDiv(out_w, subgraph.granularity.width);
-    int64_t const tiles_h = CeilDiv(out_h, subgraph.granularity.height);
-    int64_t const num_spatial_tiles = tiles_w * tiles_h;
-    for (size_t out_tensor_idx : meta.final_outputs) {
-        int64_t const curr_w = problem_.tensors[out_tensor_idx].width;
-        int64_t const curr_h = problem_.tensors[out_tensor_idx].height;
-        int64_t const curr_tiles_w = CeilDiv(curr_w, subgraph.granularity.width);
-        int64_t const curr_tiles_h = CeilDiv(curr_h, subgraph.granularity.height);
-        if (curr_tiles_w * curr_tiles_h != num_spatial_tiles) {
-            return absl::InvalidArgumentError(
-                "CostModel: inconsistent final output tile counts in one subgraph");
-        }
-    }
+    SpatialGrid const grid = BuildCanonicalSpatialGrid(problem_, subgraph, meta.final_outputs);
+    int64_t const num_spatial_tiles = grid.tiles_w * grid.tiles_h;
 
-    auto traversal_order_or = BuildTraversalOrder(problem_, subgraph, reference_output_tensor);
+    auto traversal_order_or = BuildTraversalOrder(subgraph, grid);
     if (!traversal_order_or.ok()) {
         return traversal_order_or.status();
     }
@@ -1002,8 +1061,7 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
     }
 
     // Retained tensors still affect memory writeback accounting for this subgraph.
-    std::set<size_t> retained_for_next =
-        BuildNextRetainedSet(problem_, subgraph, meta, prev_retained_tensors);
+    std::set<size_t> retained_for_next = BuildNextRetainedSet(subgraph, meta);
 
     // Slices kept only across adjacent steps inside current subgraph.
     // This captures short-term reuse from traversal locality and split-k accumulation.
@@ -1027,8 +1085,9 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
             }
 
             // Backward-propagated tile requirements for this exact (spatial,k) step.
-            StepRequirements const reqs = CollectStepRequirements(
-                problem, subgraph, meta, producer_op_, spatial_tile_idx, tiles_w, k_start, k_size);
+            StepRequirements const reqs =
+                CollectStepRequirements(problem, subgraph, meta, producer_op_, spatial_tile_idx,
+                                        grid.tiles_w, k_start, k_size);
             // Arithmetic component for this step.
             double const step_compute_time =
                 ComputeStepComputeTime(problem_, subgraph, reqs.op_requirements);

@@ -1,5 +1,6 @@
 build/
 build-*/
+build_*/
 out.json
 md_plans/
 .vscode/
@@ -7,3 +8,4 @@ md_plans/
 logs/
 compile_commands.json
 mlsys
+__pycache__

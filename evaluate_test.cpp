@@ -73,7 +73,7 @@ TEST(EvaluateTest, Example5_OutputB_Pass) {
     ExpectPass("example-5-input.json", "example-5-output-B.json");
 }
 
-TEST(EvaluateTest, RetainedLoadedInput_CountsTowardCapacity) {
+TEST(EvaluateTest, RetainedGraphInput_Fail) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 64, .height = 64},
@@ -96,7 +96,7 @@ TEST(EvaluateTest, RetainedLoadedInput_CountsTowardCapacity) {
 
     auto result = mlsys::Evaluate(problem, solution);
     ASSERT_FALSE(result.ok());
-    EXPECT_NE(std::string(result.status().message()).find("[Fast Memory Capacity Exceeded]"),
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Retained Tensor]"),
               std::string::npos)
         << result.status().message();
 }
@@ -483,7 +483,7 @@ TEST(EvaluateTest, UnaryPointwiseEphemeralInputRemainsFreeInsideSubgraph) {
     EXPECT_NEAR(result.value(), 1.0, 1e-9);
 }
 
-TEST(EvaluateTest, MultipleFinalOutputsDifferentDimensions_Fail) {
+TEST(EvaluateTest, MultipleFinalOutputsDifferentDimensions_Pass) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 64, .height = 64},  // t0 input of op0
@@ -509,10 +509,8 @@ TEST(EvaluateTest, MultipleFinalOutputsDifferentDimensions_Fail) {
     mlsys::Solution solution{.subgraphs = {sg}};
 
     auto result = mlsys::Evaluate(problem, solution);
-    ASSERT_FALSE(result.ok());
-    EXPECT_NE(std::string(result.status().message()).find("[Invalid Subgraph Outputs]"),
-              std::string::npos)
-        << result.status().message();
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 1.0, 1e-9);
 }
 
 TEST(EvaluateTest, MultipleFinalOutputsDifferentOpTypes_Fail) {
@@ -548,7 +546,7 @@ TEST(EvaluateTest, MultipleFinalOutputsDifferentOpTypes_Fail) {
         << result.status().message();
 }
 
-TEST(EvaluateTest, PointwiseFinalOutputWithNonUnitK_Fail) {
+TEST(EvaluateTest, PointwiseFinalOutputWithNonUnitK_Pass) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 128, .height = 128}, // t0 input
@@ -571,8 +569,233 @@ TEST(EvaluateTest, PointwiseFinalOutputWithNonUnitK_Fail) {
     mlsys::Solution solution{.subgraphs = {sg}};
 
     auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 1.0, 1e-9);
+}
+
+TEST(EvaluateTest, RejectsGranularityAboveNative) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 256, .height = 128, .depth = 128};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
     ASSERT_FALSE(result.ok());
-    EXPECT_NE(std::string(result.status().message()).find("[Invalid Subgraph Outputs]"),
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Granularity]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, RejectsMatMulDepthAboveReductionDimension) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 128},
+        {.width = 128, .height = 64},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 128};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Granularity]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, TraversalOrderUsesCanonicalGridForDifferentOutputShapes) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 256, .height = 128}, // t0 input of op0
+        {.width = 128, .height = 256}, // t1 input of op1
+        {.width = 256, .height = 128}, // t2 output of op0, 2x1 tiles
+        {.width = 128, .height = 256}, // t3 output of op1, 1x2 tiles
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {2}, .base_cost = 1},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {3}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg.traversal_order = mlsys::TraversalOrder{0, 1, 2, 3};
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 1.0, 1e-9);
+
+    sg.traversal_order = mlsys::TraversalOrder{0, 1, 2, 4};
+    solution.subgraphs = {sg};
+    result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Traversal Order]"),
+              std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, CapacityUsesClippedTileSizeWhenTensorSmallerThanGranularity) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 64, .height = 64},
+        {.width = 64, .height = 64},
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 9'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 1.0, 1e-9);
+}
+
+TEST(EvaluateTest, PointwiseProducedMatMulLhsMustCoverFullK) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 64}, // t0 pointwise input
+        {.width = 128, .height = 64}, // t1 pointwise output, matmul lhs
+        {.width = 64, .height = 128}, // t2 matmul rhs
+        {.width = 64, .height = 64},  // t3 matmul output
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+        {.op_type = "MatMul", .inputs = {1, 2}, .outputs = {3}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 64, .height = 64, .depth = 64};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Split-K]"), std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, PointwiseProducedMatMulLhsMustFitOneSpatialTile) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 32, .height = 256},  // t0 op0 lhs
+        {.width = 32, .height = 32},   // t1 op0 rhs
+        {.width = 32, .height = 256},  // t2 op0 output
+        {.width = 32, .height = 256},  // t3 pointwise output, op2 lhs
+        {.width = 128, .height = 32},  // t4 op2 rhs
+        {.width = 128, .height = 256}, // t5 op2 output, taller than one native tile
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 1},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 1},
+        {.op_type = "MatMul", .inputs = {3, 4}, .outputs = {5}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1, 2};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 32};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Split-K]"), std::string::npos)
+        << result.status().message();
+}
+
+TEST(EvaluateTest, RetentionPassThrough_Fail) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 128, .height = 128}, // t0 input
+        {.width = 128, .height = 128}, // t1 produced and retained by sg0
+        {.width = 128, .height = 128}, // t2 produced by sg1
+    };
+    problem.ops = {
+        {.op_type = "Pointwise", .inputs = {0}, .outputs = {1}, .base_cost = 1},
+        {.op_type = "Pointwise", .inputs = {1}, .outputs = {2}, .base_cost = 1},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 10;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg0;
+    sg0.ops = {0};
+    sg0.tensors_to_retain = {1};
+    sg0.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg0.traversal_order = std::nullopt;
+    sg0.subgraph_latency = 1.0;
+
+    mlsys::Subgraph sg1;
+    sg1.ops = {1};
+    sg1.tensors_to_retain = {1};
+    sg1.granularity = {.width = 128, .height = 128, .depth = 1};
+    sg1.traversal_order = std::nullopt;
+    sg1.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg0, sg1}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_FALSE(result.ok());
+    EXPECT_NE(std::string(result.status().message()).find("[Invalid Retained Tensor]"),
               std::string::npos)
         << result.status().message();
 }
