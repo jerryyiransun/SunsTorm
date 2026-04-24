@@ -793,8 +793,7 @@ auto NormalizeAndValidateSolution(const Problem& problem, const std::vector<size
                 return false;
             }
 
-            bool const touched = produced.contains(tensor_idx) || consumed.contains(tensor_idx) ||
-                                 retained_available[tensor_idx];
+            bool const touched = produced.contains(tensor_idx);
             bool const available = globally_available[tensor_idx] ||
                                    retained_available[tensor_idx] || local_available[tensor_idx];
             if (touched && available) {
