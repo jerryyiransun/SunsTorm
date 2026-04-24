@@ -23,7 +23,7 @@ auto main(int argc, char* argv[]) -> int {
     }
     const Problem& problem = problem_status.value();
 
-    std::unique_ptr<Solver> solver = std::make_unique<GreedySolver>(output_path);
+    std::unique_ptr<Solver> solver = std::make_unique<HeuristicSolver>();
     auto solution_status = solver->solve(problem);
     if (!solution_status.ok()) {
         std::cerr << "Error solving problem: " << solution_status.status().message() << "\n";
@@ -31,7 +31,7 @@ auto main(int argc, char* argv[]) -> int {
     }
     const Solution& solution = solution_status.value();
 
-#ifdef DEBUG
+    // #ifdef DEBUG
     auto eval_status = Evaluate(problem, solution);
     if (eval_status.ok()) {
         std::cout << "Evaluation successful.\n";
@@ -39,7 +39,7 @@ auto main(int argc, char* argv[]) -> int {
     } else {
         std::cerr << "Error evaluating solution: " << eval_status.status().message() << "\n";
     }
-#endif // DEBUG
+    // #endif // DEBUG
 
     auto write_status = WriteSolutionAtomically(solution, output_path);
     if (!write_status.ok()) {

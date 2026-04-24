@@ -246,15 +246,15 @@ TEST(TilerTest, CostGuidedDivisorTilerFindsValidTiling) {
     ASSERT_TRUE(eval.ok()) << eval.status().message();
 }
 
-TEST(TilerTest, CostGuidedDivisorTilerUsesDivisorCandidateBetweenHalvingSteps) {
-    auto problem = MakeSinglePointwiseProblem(384, 128);
-    problem.fast_memory_capacity = 13'000;
+TEST(TilerTest, CostGuidedDivisorTilerUsesGreedyCeilCandidateSet) {
+    auto problem = MakeSinglePointwiseProblem(500, 128);
+    problem.fast_memory_capacity = 12'000;
 
     mlsys::CostGuidedDivisorTiler tiler;
     auto tiled = tiler.tile(problem, mlsys::test::MakeSingleOpSolution());
     ASSERT_TRUE(tiled.ok()) << tiled.status().message();
 
-    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 96);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 84);
     EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 64);
 
     auto eval = mlsys::Evaluate(problem, tiled.value());

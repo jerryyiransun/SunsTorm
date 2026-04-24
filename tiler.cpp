@@ -56,33 +56,6 @@ auto CandidateTileSizes(int64_t dimension, int64_t cap) -> std::vector<int64_t> 
     return candidates;
 }
 
-// Builds descending exact-divisor candidates for the cost-guided tiler.
-auto DivisorCandidates(int64_t value, int64_t cap) -> std::vector<int64_t> {
-    value = std::max<int64_t>(1, value);
-    cap = std::max<int64_t>(1, cap);
-
-    std::vector<int64_t> candidates;
-    for (int64_t divisor = 1; divisor <= value / divisor; ++divisor) {
-        if ((value % divisor) != 0) {
-            continue;
-        }
-        int64_t const paired = value / divisor;
-        if (divisor <= cap) {
-            candidates.push_back(divisor);
-        }
-        if (paired != divisor && paired <= cap) {
-            candidates.push_back(paired);
-        }
-    }
-
-    std::sort(candidates.begin(), candidates.end(), std::greater<>());
-    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-    if (candidates.empty()) {
-        candidates.push_back(1);
-    }
-    return candidates;
-}
-
 // Finds the split-k depth that can affect final MatMul outputs of a subgraph.
 auto FinalMatMulDepth(const Problem& problem, const Subgraph& subgraph) -> std::optional<int64_t> {
     std::set<size_t> consumed;
@@ -445,22 +418,22 @@ auto EstimateCandidateLatency(const Problem& problem, const Solution& solution, 
     return latency.value();
 }
 
-// Tiles one subgraph by comparing divisor-based spatial and split-k candidates.
-auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& solution, size_t sg_idx,
-                                        const std::set<size_t>& prev_retained_tensors,
-                                        const std::vector<int>& producer_op, CostModel& cost_model)
+// Tiles one subgraph by comparing greedy-style spatial and split-k candidates.
+auto TileSubgraphWithCostGuidedCandidates(const Problem& problem, Solution& solution, size_t sg_idx,
+                                          const std::set<size_t>& prev_retained_tensors,
+                                          const std::vector<int>& producer_op, CostModel& cost_model)
     -> Status {
     Subgraph& subgraph = solution.subgraphs[sg_idx];
     Tensor const output_shape = MaxFinalOutputShape(problem, subgraph);
 
     std::vector<int64_t> width_candidates =
-        DivisorCandidates(output_shape.width, problem.native_granularity.width);
+        CandidateTileSizes(output_shape.width, problem.native_granularity.width);
     std::vector<int64_t> height_candidates =
-        DivisorCandidates(output_shape.height, problem.native_granularity.height);
+        CandidateTileSizes(output_shape.height, problem.native_granularity.height);
     std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, subgraph);
     std::vector<int64_t> depth_candidates =
         final_matmul_depth.has_value()
-            ? DivisorCandidates(final_matmul_depth.value(), problem.native_granularity.depth)
+            ? CandidateTileSizes(final_matmul_depth.value(), problem.native_granularity.depth)
             : std::vector<int64_t>{1};
 
 #ifdef DEBUG
@@ -811,7 +784,7 @@ auto CostGuidedDivisorTiler::tile(const Problem& problem, const Solution& soluti
     CostModel cost_model(problem);
 
     for (size_t sg_idx = 0; sg_idx < tiled_solution.subgraphs.size(); ++sg_idx) {
-        auto status = TileSubgraphWithCostGuidedDivisors(
+        auto status = TileSubgraphWithCostGuidedCandidates(
             problem, tiled_solution, sg_idx, prev_retained_tensors, producer_op, cost_model);
         if (!status.ok()) {
             return status;
@@ -842,7 +815,7 @@ auto CostGuidedDivisorTiler::tile_subgraph(const Problem& problem, const Solutio
     }
 
     CostModel cost_model(problem);
-    auto status = TileSubgraphWithCostGuidedDivisors(
+    auto status = TileSubgraphWithCostGuidedCandidates(
         problem, tiled_solution, sg_idx, prev_retained_tensors, producer_op, cost_model);
     if (!status.ok()) {
         return status;

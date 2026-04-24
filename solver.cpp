@@ -40,13 +40,25 @@ struct IntervalPlan {
 };
 
 auto MaxFusionWidthForProblem(size_t num_ops) -> size_t {
-    if (num_ops <= 8) {
-        return 6;
+    if (num_ops <= 5) {
+        return 3;
     }
-    if (num_ops <= 20) {
-        return 5;
+    if (num_ops <= 24) {
+        return 3;
     }
-    return 2;
+    if (num_ops <= 32) {
+        return 3;
+    }
+    if (num_ops <= 64) {
+        return 3;
+    }
+    if (num_ops <= 128) {
+        return 3;
+    }
+    if (num_ops <= 256) {
+        return 3;
+    }
+    return 3;
 }
 
 auto GreedyConfigForProblem(size_t num_ops) -> GreedyFuserConfig {
