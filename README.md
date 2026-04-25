@@ -79,6 +79,10 @@ Notes:
 - On Apple Silicon, Docker uses `linux/amd64` emulation, so this is useful for
   compatibility smoke testing but not reliable for final timing.
 
+## Our Algorithm
+
+See [ALGORITHM.md](docs/ALGORITHM.md)
+
 ## Debug
 
 See [DEBUG.md](docs/DEBUG.md)
