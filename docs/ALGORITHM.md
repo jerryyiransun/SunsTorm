@@ -9,7 +9,7 @@ the solver constructs a schedule whose total latency is minimized under an
 effective fast-memory capacity constraint. The submitted binary uses
 `GreedySolver(output_path)`: a bounded lookahead greedy fuser proposes structural
 changes, a tiler assigns legal granularities, `CostModel` evaluates exact
-estimated latency, and the resulting solution is atomically written. In release
+estimated latency, and the resulting solution is atomically written to disk. In release
 execution, `main.cpp` does not run the evaluator on the critical path; `Evaluate`
 is kept as a debug/local validation tool.
 
