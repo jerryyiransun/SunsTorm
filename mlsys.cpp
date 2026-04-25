@@ -362,6 +362,41 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
         q.emplace_back(t_idx, tensor, true);
     }
 
+    std::set<size_t> split_k_output_tensors;
+    std::set<size_t> split_k_visit;
+    std::function<void(size_t)> collect_split_k_outputs = [&](size_t tensor_idx) {
+        if (!split_k_visit.insert(tensor_idx).second) {
+            return;
+        }
+        if (tensor_idx >= producer_op.size()) {
+            return;
+        }
+
+        int const producer_idx = producer_op[tensor_idx];
+        if (producer_idx < 0 || !subgraph_ops.contains(static_cast<size_t>(producer_idx))) {
+            return;
+        }
+
+        const Op& producer = problem.ops[static_cast<size_t>(producer_idx)];
+        if (producer.op_type == "MatMul") {
+            split_k_output_tensors.insert(tensor_idx);
+            return;
+        }
+
+        if (producer.op_type != "Pointwise") {
+            return;
+        }
+
+        for (size_t input_idx : producer.inputs) {
+            if (subgraph_produced.contains(input_idx)) {
+                collect_split_k_outputs(input_idx);
+            }
+        }
+    };
+    for (size_t tensor_idx : final_output_tensors) {
+        collect_split_k_outputs(tensor_idx);
+    }
+
     size_t head = 0;
     auto is_ignored_tensor_in_backward = [&](size_t tensor_idx) {
         return final_output_tensors.contains(tensor_idx) ||
@@ -480,8 +515,9 @@ auto SubgraphFitsFastMemoryImpl(const Problem& problem, const Solution& solution
             size_t const lhs_tensor_idx = op.inputs[0];
             size_t const rhs_tensor_idx = op.inputs[1];
 
+            bool const uses_split_k = split_k_output_tensors.contains(curr_tensor_idx);
             int64_t const inner_k =
-                is_final ? subgraph.granularity.depth : problem.tensors[lhs_tensor_idx].width;
+                uses_split_k ? subgraph.granularity.depth : problem.tensors[lhs_tensor_idx].width;
 
 #ifdef DEBUG
             if (emit_debug) {

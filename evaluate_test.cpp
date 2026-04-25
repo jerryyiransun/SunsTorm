@@ -573,6 +573,36 @@ TEST(EvaluateTest, PointwiseFinalOutputWithNonUnitK_Pass) {
     EXPECT_NEAR(result.value(), 1.0, 1e-9);
 }
 
+TEST(EvaluateTest, MatMulPointwiseEpilogueAllowsSplitK) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 384, .height = 128}, // t0 matmul lhs
+        {.width = 128, .height = 384}, // t1 matmul rhs
+        {.width = 128, .height = 128}, // t2 matmul output, pointwise input
+        {.width = 128, .height = 128}, // t3 pointwise output
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 60'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 128};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 1.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    auto result = mlsys::Evaluate(problem, solution);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_NEAR(result.value(), 1.0, 1e-9);
+}
+
 TEST(EvaluateTest, RejectsGranularityAboveNative) {
     mlsys::Problem problem;
     problem.tensors = {

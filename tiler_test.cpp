@@ -9,6 +9,35 @@ namespace {
 using mlsys::test::ExpectTraversalOrderForBothTilers;
 using mlsys::test::MakeSinglePointwiseProblem;
 
+auto MakeMatMulPointwiseEpilogueProblem() -> mlsys::Problem {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 384, .height = 128},
+        {.width = 128, .height = 384},
+        {.width = 128, .height = 128},
+        {.width = 128, .height = 128},
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 60'000;
+    problem.slow_memory_bandwidth = 20;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+    return problem;
+}
+
+auto MakeFusedMatMulPointwiseSolution() -> mlsys::Solution {
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.traversal_order = std::nullopt;
+
+    mlsys::Solution solution;
+    solution.subgraphs = {sg};
+    return solution;
+}
+
 TEST(TilerTest, SingleMatMulCanBeTiledToFitFastMemory) {
     mlsys::Problem problem;
     problem.tensors = {
@@ -158,27 +187,9 @@ TEST(TilerTest, BruteForceTilerStartsDepthAtNativeForFinalMatMul) {
     ASSERT_TRUE(eval.ok()) << eval.status().message();
 }
 
-TEST(TilerTest, GreedyTilerKeepsDepthOneForPointwiseFinalOutput) {
-    mlsys::Problem problem;
-    problem.tensors = {
-        {.width = 384, .height = 128},
-        {.width = 128, .height = 384},
-        {.width = 128, .height = 128},
-        {.width = 128, .height = 128},
-    };
-    problem.ops = {
-        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000},
-        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 100},
-    };
-    problem.fast_memory_capacity = 1'000'000;
-    problem.slow_memory_bandwidth = 20;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
-
-    mlsys::Solution solution;
-    mlsys::Subgraph sg;
-    sg.ops = {0, 1};
-    sg.tensors_to_retain = {};
-    solution.subgraphs = {sg};
+TEST(TilerTest, GreedyTilerUsesSplitKForPointwiseEpilogueFinalOutput) {
+    mlsys::Problem problem = MakeMatMulPointwiseEpilogueProblem();
+    mlsys::Solution solution = MakeFusedMatMulPointwiseSolution();
 
     mlsys::GreedyTiler tiler;
     auto tiled = tiler.tile(problem, solution);
@@ -186,33 +197,15 @@ TEST(TilerTest, GreedyTilerKeepsDepthOneForPointwiseFinalOutput) {
 
     EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 128);
     EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
-    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 1);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 128);
 
     auto eval = mlsys::Evaluate(problem, tiled.value());
     ASSERT_TRUE(eval.ok()) << eval.status().message();
 }
 
-TEST(TilerTest, BruteForceTilerKeepsDepthOneForPointwiseFinalOutput) {
-    mlsys::Problem problem;
-    problem.tensors = {
-        {.width = 384, .height = 128},
-        {.width = 128, .height = 384},
-        {.width = 128, .height = 128},
-        {.width = 128, .height = 128},
-    };
-    problem.ops = {
-        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000},
-        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 100},
-    };
-    problem.fast_memory_capacity = 1'000'000;
-    problem.slow_memory_bandwidth = 20;
-    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
-
-    mlsys::Solution solution;
-    mlsys::Subgraph sg;
-    sg.ops = {0, 1};
-    sg.tensors_to_retain = {};
-    solution.subgraphs = {sg};
+TEST(TilerTest, BruteForceTilerUsesSplitKForPointwiseEpilogueFinalOutput) {
+    mlsys::Problem problem = MakeMatMulPointwiseEpilogueProblem();
+    mlsys::Solution solution = MakeFusedMatMulPointwiseSolution();
 
     mlsys::BruteForceTiler tiler;
     auto tiled = tiler.tile(problem, solution);
@@ -220,7 +213,23 @@ TEST(TilerTest, BruteForceTilerKeepsDepthOneForPointwiseFinalOutput) {
 
     EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 128);
     EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
-    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 1);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 128);
+
+    auto eval = mlsys::Evaluate(problem, tiled.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+}
+
+TEST(TilerTest, CostGuidedDivisorTilerUsesSplitKForPointwiseEpilogueFinalOutput) {
+    mlsys::Problem problem = MakeMatMulPointwiseEpilogueProblem();
+    mlsys::Solution solution = MakeFusedMatMulPointwiseSolution();
+
+    mlsys::CostGuidedDivisorTiler tiler;
+    auto tiled = tiler.tile(problem, solution);
+    ASSERT_TRUE(tiled.ok()) << tiled.status().message();
+
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.width, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.height, 128);
+    EXPECT_EQ(tiled.value().subgraphs[0].granularity.depth, 128);
 
     auto eval = mlsys::Evaluate(problem, tiled.value());
     ASSERT_TRUE(eval.ok()) << eval.status().message();
