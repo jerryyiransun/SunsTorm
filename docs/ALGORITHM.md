@@ -106,7 +106,7 @@ The raw potential is
 
 $$
 \phi(m)=
-\max\left(1,\mathrm{round}\left(\frac{D(\Delta,T)}{P_m}\right)\right),
+\max(1,\mathrm{round}(\frac{D(\Delta,T)}{P_m})),
 $$
 
 with non-positive or non-finite scores discarded. Before beam evaluation, the
@@ -141,7 +141,7 @@ the unique values
 
 $$
 \mathcal{C}(D,N)=
-\left\{\min\left(N,\left\lceil \frac{D}{r}\right\rceil\right): r=1,\ldots,D\right\}.
+\{\min(N,\lceil D/r \rceil) \mid r=1,\ldots,D\}.
 $$
 
 The list is traversed from largest to smallest. For a subgraph, $w$ and $h$ come
