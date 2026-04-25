@@ -39,6 +39,14 @@ Use `run_solver` for local experimentation when you want to choose a solver from
 ./build/run_solver <greedy|base|heuristic|brute_force> <input.json> <output.json> [--fuser-log-dir=<dir>]
 ```
 
+## Benchmark Runner
+
+Use `build_and_run_benchmarks.py` to build the Release benchmark tools, run a
+solver across every benchmark JSON, and write timestamped solution files plus a
+Markdown report.
+
+See [BENCHMARK_RUNNER.md](docs/BENCHMARK_RUNNER.md).
+
 ## Docker Grading Smoke Test
 
 Use the Docker scripts to build and run `mlsys` in an Ubuntu 22.04 `linux/amd64` environment that matches the competition runtime target.
