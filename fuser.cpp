@@ -948,36 +948,44 @@ auto FindLatestSubgraphContainingOp(const Solution& solution, size_t op_idx, siz
     return std::nullopt;
 }
 
-void PrefuseProducerIntoUnaryPointwiseConsumers(const Problem& problem,
-                                                const std::vector<int>& producer_op,
-                                                const std::vector<size_t>& topo_rank,
-                                                Solution& solution) {
+auto IsUnaryPointwiseOp(const Op& op) -> bool {
+    return op.op_type == "Pointwise" && op.inputs.size() == 1;
+}
+
+auto SubgraphHasOnlyUnaryPointwiseOps(const Problem& problem, const Subgraph& subgraph) -> bool {
+    return std::all_of(subgraph.ops.begin(), subgraph.ops.end(),
+                       [&](size_t op_idx) { return IsUnaryPointwiseOp(problem.ops[op_idx]); });
+}
+
+void PrefuseUnaryPointwiseChains(const Problem& problem, const std::vector<int>& producer_op,
+                                 const std::vector<size_t>& topo_rank, Solution& solution) {
     while (true) {
         bool changed = false;
         for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
             const auto& current_subgraph = solution.subgraphs[sg_idx];
             for (size_t pointwise_op_idx : current_subgraph.ops) {
                 const Op& pointwise_op = problem.ops[pointwise_op_idx];
-                if (pointwise_op.op_type != "Pointwise" || pointwise_op.inputs.size() != 1) {
+                if (!IsUnaryPointwiseOp(pointwise_op)) {
                     continue;
                 }
 
                 size_t const input_tensor = pointwise_op.inputs[0];
                 int const producer = producer_op[input_tensor];
-                if (producer >= 0) {
-                    auto producer_sg_idx = FindLatestSubgraphContainingOp(
-                        solution, static_cast<size_t>(producer), sg_idx);
-                    if (producer_sg_idx.has_value()) {
-                        // TODO: Add a tiler/cost-aware guard for MatMul->Pointwise hard pre-fuse.
-                        // Split-k behavior can make these fusions latency-regressive.
-                        Solution candidate = BuildDirectMergeSolution(
-                            solution, producer_sg_idx.value(), sg_idx, topo_rank);
-                        if (NormalizeAndValidateSolution(problem, topo_rank, producer_op,
-                                                         candidate)) {
-                            solution = std::move(candidate);
-                            changed = true;
-                            break;
-                        }
+                if (producer < 0 || !IsUnaryPointwiseOp(problem.ops[producer])) {
+                    continue;
+                }
+
+                auto producer_sg_idx =
+                    FindLatestSubgraphContainingOp(solution, static_cast<size_t>(producer), sg_idx);
+                if (producer_sg_idx.has_value() &&
+                    SubgraphHasOnlyUnaryPointwiseOps(problem,
+                                                     solution.subgraphs[producer_sg_idx.value()])) {
+                    Solution candidate = BuildDirectMergeSolution(solution, producer_sg_idx.value(),
+                                                                  sg_idx, topo_rank);
+                    if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, candidate)) {
+                        solution = std::move(candidate);
+                        changed = true;
+                        break;
                     }
                 }
             }
@@ -1790,7 +1798,7 @@ auto BuildInitialGreedySolution(const Problem& problem, const TopologyInfo& topo
         initial_solution.subgraphs.push_back(subgraph);
     }
 
-    PrefuseProducerIntoUnaryPointwiseConsumers(problem, producer_op, topo.rank, initial_solution);
+    PrefuseUnaryPointwiseChains(problem, producer_op, topo.rank, initial_solution);
 
     if (!NormalizeAndValidateSolution(problem, topo.rank, producer_op, initial_solution)) {
         return absl::FailedPreconditionError("Failed to build a valid initial greedy solution");

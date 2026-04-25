@@ -309,7 +309,7 @@ TEST(FuserTest, PrefuseDoesNotHardFuseIntoMatMulConsumer) {
     ExpectGreedySolutionValid(problem, *solution);
 }
 
-TEST(FuserTest, PrefuseFusesMatMulProducerIntoUnaryPointwiseConsumer) {
+TEST(FuserTest, InitialPrefuseDoesNotFuseMatMulProducerIntoUnaryPointwiseConsumer) {
     mlsys::Problem problem;
     problem.tensors = {
         {.width = 32, .height = 32},
@@ -325,12 +325,20 @@ TEST(FuserTest, PrefuseFusesMatMulProducerIntoUnaryPointwiseConsumer) {
     problem.slow_memory_bandwidth = 10;
     problem.native_granularity = {.width = 32, .height = 32, .depth = 32};
 
-    mlsys::GreedyFuser fuser(MakeGreedyConfig(0, 8));
+    std::vector<mlsys::Solution> best_updates;
+    mlsys::GreedyFuser fuser(
+        MakeGreedyConfig(0, 8),
+        [&](const mlsys::Solution& solution, mlsys::TotalLatency) -> absl::Status {
+            best_updates.push_back(solution);
+            return absl::OkStatus();
+        });
     auto solution = fuser.fuse(problem);
     ASSERT_TRUE(solution.ok()) << solution.status().message();
 
-    ASSERT_EQ(solution->subgraphs.size(), 1u);
-    EXPECT_EQ(solution->subgraphs[0].ops, std::vector<size_t>({0, 1}));
+    ASSERT_FALSE(best_updates.empty());
+    ASSERT_EQ(best_updates[0].subgraphs.size(), 2u);
+    EXPECT_EQ(best_updates[0].subgraphs[0].ops, std::vector<size_t>({0}));
+    EXPECT_EQ(best_updates[0].subgraphs[1].ops, std::vector<size_t>({1}));
     ExpectGreedySolutionValid(problem, *solution);
 }
 
