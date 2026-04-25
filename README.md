@@ -1,6 +1,10 @@
 # MLSys 2026 Google Graph Scheduling Competition
 
-![Build Status](https://github.com/jerryyiransun/MLSys2026-Google-Graph-Scheduling-Competition/actions/workflows/ci.yaml/badge.svg)
+<p align="center">
+  <a href="https://github.com/jerryyiransun/MLSys2026-Google-Graph-Scheduling-Competition/actions/workflows/ci.yaml">
+    <img src="https://github.com/jerryyiransun/MLSys2026-Google-Graph-Scheduling-Competition/actions/workflows/ci.yaml/badge.svg" alt="Build Status">
+  </a>
+</p>
 
 This repository contains our algorithm for Track A of the [MLSys 2026 Google Graph Scheduling Competition](https://github.com/yarongmu-google/MLSys).
 
