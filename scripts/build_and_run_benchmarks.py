@@ -13,8 +13,9 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
-    default_build_dir = script_dir / "build-release"
-    default_benchmark_dir = script_dir / "benchmarks"
+    repo_root = script_dir.parent
+    default_build_dir = repo_root / "build-release"
+    default_benchmark_dir = repo_root / "benchmarks"
     default_runs_dir = default_build_dir / "runs"
 
     parser = argparse.ArgumentParser(
@@ -192,7 +193,7 @@ def write_report(report_path: Path, run_dir: Path, rows: list[dict[str, str]]) -
 
 def main() -> int:
     args = parse_args()
-    repo_root = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parent.parent
     build_dir = args.build_dir.resolve()
     benchmark_dir = args.benchmark_dir.resolve()
     runs_dir = args.runs_dir.resolve()
