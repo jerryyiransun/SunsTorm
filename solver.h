@@ -27,7 +27,13 @@ class BruteForceSolver : public Solver {
 
 class HeuristicSolver : public Solver {
   public:
+    HeuristicSolver() = default;
+    explicit HeuristicSolver(std::string anytime_output_path);
+
     auto solve(const Problem& problem) -> StatusOr<Solution> override;
+
+  private:
+    std::optional<std::string> anytime_output_path_;
 };
 
 class GreedySolver : public Solver {

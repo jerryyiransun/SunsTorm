@@ -56,51 +56,63 @@ auto CandidateTileSizes(int64_t dimension, int64_t cap) -> std::vector<int64_t> 
     return candidates;
 }
 
-// Builds descending exact-divisor candidates for the cost-guided tiler.
-auto DivisorCandidates(int64_t value, int64_t cap) -> std::vector<int64_t> {
-    value = std::max<int64_t>(1, value);
-    cap = std::max<int64_t>(1, cap);
-
-    std::vector<int64_t> candidates;
-    for (int64_t divisor = 1; divisor <= value / divisor; ++divisor) {
-        if ((value % divisor) != 0) {
-            continue;
-        }
-        int64_t const paired = value / divisor;
-        if (divisor <= cap) {
-            candidates.push_back(divisor);
-        }
-        if (paired != divisor && paired <= cap) {
-            candidates.push_back(paired);
-        }
-    }
-
-    std::sort(candidates.begin(), candidates.end(), std::greater<>());
-    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-    if (candidates.empty()) {
-        candidates.push_back(1);
-    }
-    return candidates;
-}
-
-// Finds the split-k depth that can affect final MatMul outputs of a subgraph.
-auto FinalMatMulDepth(const Problem& problem, const Subgraph& subgraph) -> std::optional<int64_t> {
+// Finds the split-k depth that can affect final outputs of a subgraph.
+//
+// A final MatMul output can split directly. A final Pointwise output can also
+// split when it is an epilogue over an upstream MatMul: the MatMul k-loop
+// completes inside the subgraph, then the Pointwise fires on the completed
+// spatial tile.
+auto SplitKMatMulDepth(const Problem& problem, const Subgraph& subgraph) -> std::optional<int64_t> {
+    std::set<size_t> op_set(subgraph.ops.begin(), subgraph.ops.end());
+    std::set<size_t> produced;
     std::set<size_t> consumed;
+    std::vector<int> producer(problem.tensors.size(), -1);
+
     for (size_t op_idx : subgraph.ops) {
-        for (size_t input_idx : problem.ops[op_idx].inputs) {
+        const Op& op = problem.ops[op_idx];
+        produced.insert(op.outputs[0]);
+        producer[op.outputs[0]] = static_cast<int>(op_idx);
+        for (size_t input_idx : op.inputs) {
             consumed.insert(input_idx);
         }
     }
 
     std::optional<int64_t> max_depth;
-    for (size_t op_idx : subgraph.ops) {
-        const Op& op = problem.ops[op_idx];
-        if (op.op_type != "MatMul" || consumed.contains(op.outputs[0])) {
-            continue;
+    std::set<size_t> visited_tensors;
+    std::function<void(size_t)> collect_depth_from_tensor = [&](size_t tensor_idx) {
+        if (!visited_tensors.insert(tensor_idx).second) {
+            return;
+        }
+        if (tensor_idx >= producer.size()) {
+            return;
+        }
+        int const producer_idx = producer[tensor_idx];
+        if (producer_idx < 0 || !op_set.contains(static_cast<size_t>(producer_idx))) {
+            return;
         }
 
-        int64_t const depth = problem.tensors[op.inputs[0]].width;
-        max_depth = max_depth.has_value() ? std::max(max_depth.value(), depth) : depth;
+        const Op& op = problem.ops[static_cast<size_t>(producer_idx)];
+        if (op.op_type == "MatMul") {
+            int64_t const depth = problem.tensors[op.inputs[0]].width;
+            max_depth = max_depth.has_value() ? std::max(max_depth.value(), depth) : depth;
+            return;
+        }
+
+        if (op.op_type != "Pointwise") {
+            return;
+        }
+
+        for (size_t input_idx : op.inputs) {
+            if (produced.contains(input_idx)) {
+                collect_depth_from_tensor(input_idx);
+            }
+        }
+    };
+
+    for (size_t tensor_idx : produced) {
+        if (!consumed.contains(tensor_idx)) {
+            collect_depth_from_tensor(tensor_idx);
+        }
     }
 
     return max_depth;
@@ -445,22 +457,22 @@ auto EstimateCandidateLatency(const Problem& problem, const Solution& solution, 
     return latency.value();
 }
 
-// Tiles one subgraph by comparing divisor-based spatial and split-k candidates.
-auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& solution, size_t sg_idx,
-                                        const std::set<size_t>& prev_retained_tensors,
-                                        const std::vector<int>& producer_op, CostModel& cost_model)
-    -> Status {
+// Tiles one subgraph by comparing greedy-style spatial and split-k candidates.
+auto TileSubgraphWithCostGuidedCandidates(const Problem& problem, Solution& solution, size_t sg_idx,
+                                          const std::set<size_t>& prev_retained_tensors,
+                                          const std::vector<int>& producer_op,
+                                          CostModel& cost_model) -> Status {
     Subgraph& subgraph = solution.subgraphs[sg_idx];
     Tensor const output_shape = MaxFinalOutputShape(problem, subgraph);
 
     std::vector<int64_t> width_candidates =
-        DivisorCandidates(output_shape.width, problem.native_granularity.width);
+        CandidateTileSizes(output_shape.width, problem.native_granularity.width);
     std::vector<int64_t> height_candidates =
-        DivisorCandidates(output_shape.height, problem.native_granularity.height);
-    std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, subgraph);
+        CandidateTileSizes(output_shape.height, problem.native_granularity.height);
+    std::optional<int64_t> const split_k_matmul_depth = SplitKMatMulDepth(problem, subgraph);
     std::vector<int64_t> depth_candidates =
-        final_matmul_depth.has_value()
-            ? DivisorCandidates(final_matmul_depth.value(), problem.native_granularity.depth)
+        split_k_matmul_depth.has_value()
+            ? CandidateTileSizes(split_k_matmul_depth.value(), problem.native_granularity.depth)
             : std::vector<int64_t>{1};
 
 #ifdef DEBUG
@@ -468,8 +480,8 @@ auto TileSubgraphWithCostGuidedDivisors(const Problem& problem, Solution& soluti
     std::cout << "[DEBUG][CostGuidedDivisorTiler] subgraph " << sg_idx << " ops=";
     DebugPrintVector(subgraph.ops);
     std::cout << ", output_shape={w=" << output_shape.width << ", h=" << output_shape.height
-              << "}, depth_affects_split_k=" << (final_matmul_depth.has_value() ? "true" : "false")
-              << ", prev_retained=";
+              << "}, depth_affects_split_k="
+              << (split_k_matmul_depth.has_value() ? "true" : "false") << ", prev_retained=";
     DebugPrintVector(
         std::vector<size_t>(prev_retained_tensors.begin(), prev_retained_tensors.end()));
     std::cout << "\n";
@@ -672,11 +684,11 @@ auto BruteForceTiler::tile(const Problem& problem, const Solution& solution) -> 
         std::vector<int64_t> width_candidates = HalvingCandidates(problem.native_granularity.width);
         std::vector<int64_t> height_candidates =
             HalvingCandidates(problem.native_granularity.height);
-        std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, sg);
+        std::optional<int64_t> const split_k_matmul_depth = SplitKMatMulDepth(problem, sg);
         std::vector<int64_t> depth_candidates =
-            final_matmul_depth.has_value()
+            split_k_matmul_depth.has_value()
                 ? HalvingCandidates(
-                      std::min(final_matmul_depth.value(), problem.native_granularity.depth))
+                      std::min(split_k_matmul_depth.value(), problem.native_granularity.depth))
                 : std::vector<int64_t>{1};
 
         Granularity best_granularity{.width = 0, .height = 0, .depth = 0};
@@ -731,10 +743,10 @@ auto GreedyTiler::tile(const Problem& problem, const Solution& solution) -> Stat
             CandidateTileSizes(output_shape.width, problem.native_granularity.width);
         std::vector<int64_t> height_candidates =
             CandidateTileSizes(output_shape.height, problem.native_granularity.height);
-        std::optional<int64_t> const final_matmul_depth = FinalMatMulDepth(problem, sg);
+        std::optional<int64_t> const split_k_matmul_depth = SplitKMatMulDepth(problem, sg);
         std::vector<int64_t> depth_candidates =
-            final_matmul_depth.has_value()
-                ? CandidateTileSizes(final_matmul_depth.value(), problem.native_granularity.depth)
+            split_k_matmul_depth.has_value()
+                ? CandidateTileSizes(split_k_matmul_depth.value(), problem.native_granularity.depth)
                 : std::vector<int64_t>{1};
 
         CostGuidedDivisorState state;
@@ -811,7 +823,7 @@ auto CostGuidedDivisorTiler::tile(const Problem& problem, const Solution& soluti
     CostModel cost_model(problem);
 
     for (size_t sg_idx = 0; sg_idx < tiled_solution.subgraphs.size(); ++sg_idx) {
-        auto status = TileSubgraphWithCostGuidedDivisors(
+        auto status = TileSubgraphWithCostGuidedCandidates(
             problem, tiled_solution, sg_idx, prev_retained_tensors, producer_op, cost_model);
         if (!status.ok()) {
             return status;
@@ -842,7 +854,7 @@ auto CostGuidedDivisorTiler::tile_subgraph(const Problem& problem, const Solutio
     }
 
     CostModel cost_model(problem);
-    auto status = TileSubgraphWithCostGuidedDivisors(
+    auto status = TileSubgraphWithCostGuidedCandidates(
         problem, tiled_solution, sg_idx, prev_retained_tensors, producer_op, cost_model);
     if (!status.ok()) {
         return status;

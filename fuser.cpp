@@ -153,6 +153,7 @@ struct SearchContext {
     const std::vector<int>& producer_op;
     const TopologyInfo& topo;
     Tiler* tiler;
+    GreedyPotentialScorer potential_scorer = GreedyPotentialScorer::kMemoryTrafficDensity;
     CostModel cost_model;
     std::unordered_map<std::string, std::vector<GreedyCandidate>> scored_candidates_cache;
     std::unordered_map<size_t, double> topk_hits_by_op;
@@ -173,7 +174,7 @@ struct GreedySearchFrame {
     bool has_evaluated_state = false;
     double current_cost = std::numeric_limits<double>::infinity();
     double base_cost = std::numeric_limits<double>::infinity();
-    int remaining_lookahead = 0;
+    int lookahead_remaining = 0;
     int depth = 0;
 };
 
@@ -369,7 +370,7 @@ void LogSearchFrameState(const GreedySearchFrame& frame) {
     line << std::setprecision(17);
     line << "[SearchFrameState] depth=" << frame.depth << ", current_cost=" << frame.current_cost
          << ", base_cost=" << frame.base_cost
-         << ", remaining_lookahead=" << frame.remaining_lookahead
+         << ", remaining_lookahead=" << frame.lookahead_remaining
          << ", subgraph_ops=" << FormatSubgraphOpsListForLog(baseline_solution);
     LogFuserDebugLine(line.str());
 #else
@@ -499,7 +500,7 @@ void LogExplorativeFusion(const std::string& explore_id, const GreedySearchFrame
                     << ", move=" << MoveTypeName(candidate.type) << ", pair=("
                     << candidate.producer_sg_idx << "->" << candidate.consumer_sg_idx
                     << "), explored_score=" << next_frame.current_cost
-                    << ", next_remaining_lookahead=" << next_frame.remaining_lookahead;
+                    << ", next_remaining_lookahead=" << next_frame.lookahead_remaining;
     LogFuserDebugLine(section2_header.str());
 
     LogSolutionArraysForLog("explored_solution", evaluated_solution);
@@ -947,36 +948,44 @@ auto FindLatestSubgraphContainingOp(const Solution& solution, size_t op_idx, siz
     return std::nullopt;
 }
 
-void PrefuseProducerIntoUnaryPointwiseConsumers(const Problem& problem,
-                                                const std::vector<int>& producer_op,
-                                                const std::vector<size_t>& topo_rank,
-                                                Solution& solution) {
+auto IsUnaryPointwiseOp(const Op& op) -> bool {
+    return op.op_type == "Pointwise" && op.inputs.size() == 1;
+}
+
+auto SubgraphHasOnlyUnaryPointwiseOps(const Problem& problem, const Subgraph& subgraph) -> bool {
+    return std::all_of(subgraph.ops.begin(), subgraph.ops.end(),
+                       [&](size_t op_idx) { return IsUnaryPointwiseOp(problem.ops[op_idx]); });
+}
+
+void PrefuseUnaryPointwiseChains(const Problem& problem, const std::vector<int>& producer_op,
+                                 const std::vector<size_t>& topo_rank, Solution& solution) {
     while (true) {
         bool changed = false;
         for (size_t sg_idx = 0; sg_idx < solution.subgraphs.size(); ++sg_idx) {
             const auto& current_subgraph = solution.subgraphs[sg_idx];
             for (size_t pointwise_op_idx : current_subgraph.ops) {
                 const Op& pointwise_op = problem.ops[pointwise_op_idx];
-                if (pointwise_op.op_type != "Pointwise" || pointwise_op.inputs.size() != 1) {
+                if (!IsUnaryPointwiseOp(pointwise_op)) {
                     continue;
                 }
 
                 size_t const input_tensor = pointwise_op.inputs[0];
                 int const producer = producer_op[input_tensor];
-                if (producer >= 0) {
-                    auto producer_sg_idx = FindLatestSubgraphContainingOp(
-                        solution, static_cast<size_t>(producer), sg_idx);
-                    if (producer_sg_idx.has_value()) {
-                        // TODO: Add a tiler/cost-aware guard for MatMul->Pointwise hard pre-fuse.
-                        // Split-k behavior can make these fusions latency-regressive.
-                        Solution candidate = BuildDirectMergeSolution(
-                            solution, producer_sg_idx.value(), sg_idx, topo_rank);
-                        if (NormalizeAndValidateSolution(problem, topo_rank, producer_op,
-                                                         candidate)) {
-                            solution = std::move(candidate);
-                            changed = true;
-                            break;
-                        }
+                if (producer < 0 || !IsUnaryPointwiseOp(problem.ops[producer])) {
+                    continue;
+                }
+
+                auto producer_sg_idx =
+                    FindLatestSubgraphContainingOp(solution, static_cast<size_t>(producer), sg_idx);
+                if (producer_sg_idx.has_value() &&
+                    SubgraphHasOnlyUnaryPointwiseOps(problem,
+                                                     solution.subgraphs[producer_sg_idx.value()])) {
+                    Solution candidate = BuildDirectMergeSolution(solution, producer_sg_idx.value(),
+                                                                  sg_idx, topo_rank);
+                    if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, candidate)) {
+                        solution = std::move(candidate);
+                        changed = true;
+                        break;
                     }
                 }
             }
@@ -1114,8 +1123,221 @@ auto GenerateGreedyCandidates(const Problem& problem, const std::vector<int>& pr
     return candidates;
 }
 
-auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<int>& producer_op,
-                                     const std::vector<size_t>& topo_rank, const Solution& state)
+auto SumTensorSizes(const Problem& problem, const std::vector<size_t>& tensor_indices) -> int64_t {
+    int64_t total = 0;
+    for (size_t tensor_idx : tensor_indices) {
+        int64_t const tensor_score = TensorSize(problem, tensor_idx);
+        if (tensor_score > 0) {
+            total += tensor_score;
+        }
+    }
+    return total;
+}
+
+auto DivideByTensorCount(int64_t raw_score, size_t tensor_count) -> int64_t {
+    if (raw_score <= 0 || tensor_count == 0) {
+        return 0;
+    }
+    return raw_score / static_cast<int64_t>(tensor_count);
+}
+
+auto ComputeLegacyAveragePotentialScore(const Problem& problem, const std::vector<int>& producer_op,
+                                        const Solution& parent_state, size_t producer_sg_idx,
+                                        size_t consumer_sg_idx,
+                                        const std::vector<size_t>& shared_tensors,
+                                        const Solution& candidate_state, GreedyMoveType move_type)
+    -> int64_t {
+    size_t const shared_tensor_count = shared_tensors.size();
+    if (move_type == GreedyMoveType::kDirectFuse) {
+        int64_t const direct_raw_score =
+            kDirectFuseScoreMultiplier * ComputeNewlyInternalizedBoundaryScore(
+                                             problem, producer_op, parent_state, producer_sg_idx,
+                                             consumer_sg_idx, shared_tensors, candidate_state);
+        return DivideByTensorCount(direct_raw_score, shared_tensor_count);
+    }
+
+    // Preserve the currently active average scorer exactly for legacy A/B tests.
+    return DivideByTensorCount(SumTensorSizes(problem, shared_tensors), shared_tensor_count);
+}
+
+auto EstimateReadWriteElementsSaved(const Problem& problem, const std::vector<int>& producer_op,
+                                    const Solution& parent_state, size_t producer_sg_idx,
+                                    size_t consumer_sg_idx,
+                                    const std::vector<size_t>& shared_tensors,
+                                    const Solution& candidate_state, GreedyMoveType move_type)
+    -> int64_t {
+    if (move_type == GreedyMoveType::kDirectFuse) {
+        // A newly internalized edge avoids one write by the producer and one read by the consumer.
+        return kDirectFuseScoreMultiplier * ComputeNewlyInternalizedBoundaryScore(
+                                                problem, producer_op, parent_state, producer_sg_idx,
+                                                consumer_sg_idx, shared_tensors, candidate_state);
+    }
+
+    // Retaining a tensor conservatively models avoiding the later read.
+    return SumTensorSizes(problem, shared_tensors);
+}
+
+auto ComputeDensityScore(int64_t saved_elements, size_t shared_tensor_count) -> double {
+    if (saved_elements <= 0 || shared_tensor_count == 0) {
+        return 0.0;
+    }
+    return static_cast<double>(saved_elements) /
+           std::sqrt(static_cast<double>(shared_tensor_count));
+}
+
+auto FindDirectFusionSubgraph(const Solution& parent_state, const Solution& candidate_state,
+                              size_t producer_sg_idx, size_t consumer_sg_idx)
+    -> std::optional<size_t> {
+    std::vector<size_t> fused_ops = parent_state.subgraphs[producer_sg_idx].ops;
+    fused_ops.insert(fused_ops.end(), parent_state.subgraphs[consumer_sg_idx].ops.begin(),
+                     parent_state.subgraphs[consumer_sg_idx].ops.end());
+
+    for (size_t sg_idx = 0; sg_idx < candidate_state.subgraphs.size(); ++sg_idx) {
+        if (SubgraphContainsAllOps(candidate_state.subgraphs[sg_idx], fused_ops)) {
+            return sg_idx;
+        }
+    }
+    return std::nullopt;
+}
+
+auto EstimateDirectFusionBoundaryElements(const Problem& problem, const Solution& parent_state,
+                                          size_t producer_sg_idx, size_t consumer_sg_idx,
+                                          const Solution& candidate_state) -> int64_t {
+    std::optional<size_t> const fused_sg_idx =
+        FindDirectFusionSubgraph(parent_state, candidate_state, producer_sg_idx, consumer_sg_idx);
+    if (!fused_sg_idx.has_value()) {
+        return 0;
+    }
+
+    std::unordered_set<size_t> produced_inside;
+    std::unordered_set<size_t> consumed_inside;
+    std::unordered_set<size_t> consumed_outside;
+    const Subgraph& fused_subgraph = candidate_state.subgraphs[fused_sg_idx.value()];
+
+    for (size_t op_idx : fused_subgraph.ops) {
+        for (size_t tensor_idx : problem.ops[op_idx].outputs) {
+            produced_inside.insert(tensor_idx);
+        }
+        for (size_t tensor_idx : problem.ops[op_idx].inputs) {
+            consumed_inside.insert(tensor_idx);
+        }
+    }
+
+    for (size_t sg_idx = 0; sg_idx < candidate_state.subgraphs.size(); ++sg_idx) {
+        if (sg_idx == fused_sg_idx.value()) {
+            continue;
+        }
+        for (size_t op_idx : candidate_state.subgraphs[sg_idx].ops) {
+            for (size_t tensor_idx : problem.ops[op_idx].inputs) {
+                consumed_outside.insert(tensor_idx);
+            }
+        }
+    }
+
+    std::unordered_set<size_t> boundary_tensors;
+    for (size_t tensor_idx : consumed_inside) {
+        if (!produced_inside.contains(tensor_idx)) {
+            boundary_tensors.insert(tensor_idx);
+        }
+    }
+    for (size_t tensor_idx : produced_inside) {
+        bool const consumed_by_outside = consumed_outside.contains(tensor_idx);
+        bool const graph_output = !consumed_inside.contains(tensor_idx) && !consumed_by_outside;
+        if (consumed_by_outside || graph_output) {
+            boundary_tensors.insert(tensor_idx);
+        }
+    }
+
+    int64_t boundary_elements = 0;
+    for (size_t tensor_idx : boundary_tensors) {
+        int64_t const tensor_score = TensorSize(problem, tensor_idx);
+        if (tensor_score > 0) {
+            boundary_elements += tensor_score;
+        }
+    }
+    return boundary_elements;
+}
+
+auto ComputeDirectFusionPressureDenominator(int64_t boundary_elements, int64_t fast_memory_capacity)
+    -> double {
+    if (boundary_elements <= 0 || fast_memory_capacity <= 0) {
+        return 1.0;
+    }
+    return 1.0 + static_cast<double>(boundary_elements) / static_cast<double>(fast_memory_capacity);
+}
+
+auto ComputeRetainPressureDenominator(size_t retain_span, int64_t retained_elements,
+                                      int64_t fast_memory_capacity) -> double {
+    constexpr double kRetainSpanPenalty = 0.15;
+    double const span_penalty =
+        kRetainSpanPenalty * static_cast<double>(retain_span > 0 ? retain_span - 1 : 0);
+    double const capacity_pressure =
+        fast_memory_capacity > 0
+            ? static_cast<double>(retained_elements) / static_cast<double>(fast_memory_capacity)
+            : 0.0;
+    return 1.0 + span_penalty + capacity_pressure;
+}
+
+auto ComputeRetainPressureDenominator(const Problem& problem, size_t producer_sg_idx,
+                                      size_t consumer_sg_idx, int64_t retained_elements) -> double {
+    size_t const span = consumer_sg_idx > producer_sg_idx ? consumer_sg_idx - producer_sg_idx : 0;
+    return ComputeRetainPressureDenominator(span, retained_elements, problem.fast_memory_capacity);
+}
+
+auto ClampPositiveScore(double score) -> int64_t {
+    if (score <= 0.0 || !std::isfinite(score)) {
+        return 0;
+    }
+    double const max_score = static_cast<double>(std::numeric_limits<int64_t>::max());
+    if (score >= max_score) {
+        return std::numeric_limits<int64_t>::max();
+    }
+    return std::max<int64_t>(1, static_cast<int64_t>(std::llround(score)));
+}
+
+auto ComputeMemoryTrafficDensityPotentialScore(
+    const Problem& problem, const std::vector<int>& producer_op, const Solution& parent_state,
+    size_t producer_sg_idx, size_t consumer_sg_idx, const std::vector<size_t>& shared_tensors,
+    const Solution& candidate_state, GreedyMoveType move_type) -> int64_t {
+    int64_t const saved_elements =
+        EstimateReadWriteElementsSaved(problem, producer_op, parent_state, producer_sg_idx,
+                                       consumer_sg_idx, shared_tensors, candidate_state, move_type);
+    double score = ComputeDensityScore(saved_elements, shared_tensors.size());
+    if (move_type == GreedyMoveType::kDirectFuse) {
+        double const denom = ComputeDirectFusionPressureDenominator(
+            EstimateDirectFusionBoundaryElements(problem, parent_state, producer_sg_idx,
+                                                 consumer_sg_idx, candidate_state),
+            problem.fast_memory_capacity);
+        score /= std::max(denom, 1.0);
+    } else if (move_type == GreedyMoveType::kRetain) {
+        double const denom = ComputeRetainPressureDenominator(
+            problem, producer_sg_idx, consumer_sg_idx, SumTensorSizes(problem, shared_tensors));
+        score /= std::max(denom, 1.0);
+    }
+    return ClampPositiveScore(score);
+}
+
+auto ComputePotentialScore(const Problem& problem, const std::vector<int>& producer_op,
+                           const Solution& parent_state, size_t producer_sg_idx,
+                           size_t consumer_sg_idx, const std::vector<size_t>& shared_tensors,
+                           const Solution& candidate_state, GreedyMoveType move_type,
+                           GreedyPotentialScorer potential_scorer) -> int64_t {
+    switch (potential_scorer) {
+    case GreedyPotentialScorer::kLegacyAverage:
+        return ComputeLegacyAveragePotentialScore(problem, producer_op, parent_state,
+                                                  producer_sg_idx, consumer_sg_idx, shared_tensors,
+                                                  candidate_state, move_type);
+    case GreedyPotentialScorer::kMemoryTrafficDensity:
+        return ComputeMemoryTrafficDensityPotentialScore(
+            problem, producer_op, parent_state, producer_sg_idx, consumer_sg_idx, shared_tensors,
+            candidate_state, move_type);
+    }
+    return 0;
+}
+
+auto GenerateGreedyCandidatesWithScorer(const Problem& problem, const std::vector<int>& producer_op,
+                                        const std::vector<size_t>& topo_rank, const Solution& state,
+                                        GreedyPotentialScorer potential_scorer)
     -> std::vector<GreedyCandidate> {
     std::vector<GreedyCandidate> candidates;
     std::unordered_map<std::string, size_t> candidate_idx_by_key;
@@ -1168,13 +1390,6 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
             }
         };
 
-    auto AverageScoreByTensorCount = [](int64_t raw_score, size_t tensor_count) -> int64_t {
-        if (raw_score <= 0 || tensor_count == 0) {
-            return 0;
-        }
-        return raw_score / static_cast<int64_t>(tensor_count);
-    };
-
     for (size_t producer_sg_idx = 0; producer_sg_idx < state.subgraphs.size(); ++producer_sg_idx) {
         for (size_t consumer_sg_idx = producer_sg_idx + 1; consumer_sg_idx < state.subgraphs.size();
              ++consumer_sg_idx) {
@@ -1184,52 +1399,27 @@ auto GenerateGreedyCandidatesAverage(const Problem& problem, const std::vector<i
                 continue;
             }
 
-            size_t const shared_tensor_count = shared_tensors.size();
-
-            bool consumer_is_producer = false;
-            for (size_t downstream_sg_idx = consumer_sg_idx + 1;
-                 downstream_sg_idx < state.subgraphs.size(); ++downstream_sg_idx) {
-                if (!SharedProducerConsumerTensors(usages[consumer_sg_idx],
-                                                   usages[downstream_sg_idx])
-                         .empty()) {
-                    consumer_is_producer = true;
-                    break;
-                }
-            }
-            int64_t const potential_saving_multiplier = consumer_is_producer ? 2 : 1;
-
             Solution direct_merge =
                 BuildDirectMergeSolution(state, producer_sg_idx, consumer_sg_idx, topo_rank);
             if (NormalizeAndValidateSolution(problem, topo_rank, producer_op, direct_merge)) {
-                int64_t const direct_raw_score =
-                    kDirectFuseScoreMultiplier * ComputeNewlyInternalizedBoundaryScore(
-                                                     problem, producer_op, state, producer_sg_idx,
-                                                     consumer_sg_idx, shared_tensors, direct_merge);
-                int64_t const direct_score =
-                    AverageScoreByTensorCount(direct_raw_score, shared_tensor_count);
+                int64_t const direct_score = ComputePotentialScore(
+                    problem, producer_op, state, producer_sg_idx, consumer_sg_idx, shared_tensors,
+                    direct_merge, GreedyMoveType::kDirectFuse, potential_scorer);
                 AddOrUpdateCandidate(GreedyMoveType::kDirectFuse, std::move(direct_merge),
                                      direct_score, state.subgraphs[producer_sg_idx].ops,
                                      state.subgraphs[consumer_sg_idx].ops MLSYS_FUSER_LOG_ARGS(
                                          producer_sg_idx, consumer_sg_idx, shared_tensors));
             }
 
-            int64_t retain_total = 0;
-            for (size_t tensor_idx : shared_tensors) {
-                int64_t const tensor_score = TensorSize(problem, tensor_idx);
-                if (tensor_score <= 0) {
-                    continue;
-                }
-                retain_total += tensor_score;
-            }
-
-            if (retain_total > 0) {
+            if (SumTensorSizes(problem, shared_tensors) > 0) {
                 Solution retain_candidate =
                     BuildRetainSolution(state, producer_sg_idx, consumer_sg_idx, shared_tensors);
                 if (NormalizeAndValidateSolution(problem, topo_rank, producer_op,
                                                  retain_candidate)) {
-                    int64_t const retain_raw_score = potential_saving_multiplier * retain_total;
                     int64_t const retain_score =
-                        AverageScoreByTensorCount(retain_total, shared_tensor_count);
+                        ComputePotentialScore(problem, producer_op, state, producer_sg_idx,
+                                              consumer_sg_idx, shared_tensors, retain_candidate,
+                                              GreedyMoveType::kRetain, potential_scorer);
                     AddOrUpdateCandidate(GreedyMoveType::kRetain, std::move(retain_candidate),
                                          retain_score, state.subgraphs[producer_sg_idx].ops,
                                          state.subgraphs[consumer_sg_idx].ops MLSYS_FUSER_LOG_ARGS(
@@ -1408,8 +1598,8 @@ auto TopScoringFusions(SearchContext& context, const Solution& state)
         return cache_it->second;
     }
 
-    std::vector<GreedyCandidate> generated = GenerateGreedyCandidatesAverage(
-        context.problem, context.producer_op, context.topo.rank, state);
+    std::vector<GreedyCandidate> generated = GenerateGreedyCandidatesWithScorer(
+        context.problem, context.producer_op, context.topo.rank, state, context.potential_scorer);
     auto [inserted_it, _] =
         context.scored_candidates_cache.emplace(state_key, std::move(generated));
     return inserted_it->second;
@@ -1426,9 +1616,10 @@ auto RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
         .has_evaluated_state = has_initial_evaluated_state,
         .current_cost = initial_cost,
         .base_cost = initial_cost,
-        .remaining_lookahead = 0,
+        .lookahead_remaining = config.search_depth,
         .depth = 0,
     });
+    std::unordered_map<std::string, int> best_lookahead_by_expanded_state;
     size_t frame_seq = 0;
 
     while (!fusion_stack.empty()) {
@@ -1436,9 +1627,13 @@ auto RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
         GreedySearchFrame frame = std::move(fusion_stack.top());
         fusion_stack.pop();
 
-        if (frame.depth >= config.search_depth) {
+        std::string const expanded_state_key = MakeStateKey(frame.state);
+        auto expanded_it = best_lookahead_by_expanded_state.find(expanded_state_key);
+        if (expanded_it != best_lookahead_by_expanded_state.end() &&
+            expanded_it->second >= frame.lookahead_remaining) {
             continue;
         }
+        best_lookahead_by_expanded_state[expanded_state_key] = frame.lookahead_remaining;
 #if MLSYS_ENABLE_FUSER_LOGGING
         LogSearchFrameState(frame);
 #endif
@@ -1523,27 +1718,18 @@ auto RunGreedyLookaheadSearch(const GreedyFuserConfig& config, SearchContext& co
                 .has_evaluated_state = true,
                 .current_cost = evaluation.total_latency,
                 .base_cost = frame.base_cost,
-                .remaining_lookahead = frame.remaining_lookahead,
+                .lookahead_remaining = frame.lookahead_remaining,
                 .depth = frame.depth + 1,
             };
 
             bool selected_for_expansion = false;
-            if (frame.remaining_lookahead == 0) {
-                if (next_frame.current_cost < frame.current_cost) {
-                    next_frame.base_cost = next_frame.current_cost;
-                    next_frame.remaining_lookahead = 0;
-                } else {
-                    next_frame.base_cost = frame.current_cost;
-                    next_frame.remaining_lookahead = 2;
-                }
-                selected_for_expansion = true;
-            } else if (next_frame.current_cost < frame.base_cost) {
+            if (next_frame.current_cost < frame.current_cost) {
                 next_frame.base_cost = next_frame.current_cost;
-                next_frame.remaining_lookahead = 0;
+                next_frame.lookahead_remaining = config.search_depth;
                 selected_for_expansion = true;
-            } else if (frame.remaining_lookahead > 1) {
+            } else if (frame.lookahead_remaining > 0) {
                 next_frame.base_cost = frame.base_cost;
-                next_frame.remaining_lookahead = frame.remaining_lookahead - 1;
+                next_frame.lookahead_remaining = frame.lookahead_remaining - 1;
                 selected_for_expansion = true;
             }
 
@@ -1612,7 +1798,7 @@ auto BuildInitialGreedySolution(const Problem& problem, const TopologyInfo& topo
         initial_solution.subgraphs.push_back(subgraph);
     }
 
-    PrefuseProducerIntoUnaryPointwiseConsumers(problem, producer_op, topo.rank, initial_solution);
+    PrefuseUnaryPointwiseChains(problem, producer_op, topo.rank, initial_solution);
 
     if (!NormalizeAndValidateSolution(problem, topo.rank, producer_op, initial_solution)) {
         return absl::FailedPreconditionError("Failed to build a valid initial greedy solution");
@@ -1711,6 +1897,30 @@ void EnumerateSchedules(const Problem& problem, const std::vector<int>& producer
 
 } // namespace
 
+auto ScoreGreedyPotentialForTesting(GreedyPotentialScorer potential_scorer, int64_t saved_elements,
+                                    size_t shared_tensor_count, bool is_retain, size_t retain_span,
+                                    int64_t retained_elements, int64_t fast_memory_capacity,
+                                    int64_t direct_boundary_elements) -> int64_t {
+    switch (potential_scorer) {
+    case GreedyPotentialScorer::kLegacyAverage:
+        return DivideByTensorCount(saved_elements, shared_tensor_count);
+    case GreedyPotentialScorer::kMemoryTrafficDensity: {
+        double score = ComputeDensityScore(saved_elements, shared_tensor_count);
+        if (is_retain) {
+            score /= std::max(ComputeRetainPressureDenominator(retain_span, retained_elements,
+                                                               fast_memory_capacity),
+                              1.0);
+        } else {
+            score /= std::max(ComputeDirectFusionPressureDenominator(direct_boundary_elements,
+                                                                     fast_memory_capacity),
+                              1.0);
+        }
+        return ClampPositiveScore(score);
+    }
+    }
+    return 0;
+}
+
 GreedyFuser::GreedyFuser(GreedyFuserConfig config)
     : GreedyFuser(config, std::make_unique<GreedyTiler>()) {}
 
@@ -1762,6 +1972,7 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
         .producer_op = producer_op,
         .topo = topo,
         .tiler = tiler_.get(),
+        .potential_scorer = config_.potential_scorer,
         .cost_model = CostModel(problem),
         .best_solution_callback = best_solution_callback_,
     };

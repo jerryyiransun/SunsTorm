@@ -1069,4 +1069,37 @@ TEST(CostModelTest, ClippedSpatialTailPaysFullGranuleCompute) {
     EXPECT_NEAR(std::get<1>(estimated.value()), 2000.0, 1e-6);
 }
 
+TEST(CostModelTest, MatMulPointwiseEpilogueRunsPointwiseOnceAfterSplitK) {
+    mlsys::Problem problem;
+    problem.tensors = {
+        {.width = 384, .height = 128}, // t0 matmul lhs
+        {.width = 128, .height = 384}, // t1 matmul rhs
+        {.width = 128, .height = 128}, // t2 matmul output, pointwise input
+        {.width = 128, .height = 128}, // t3 pointwise output
+    };
+    problem.ops = {
+        {.op_type = "MatMul", .inputs = {0, 1}, .outputs = {2}, .base_cost = 2000},
+        {.op_type = "Pointwise", .inputs = {2}, .outputs = {3}, .base_cost = 100},
+    };
+    problem.fast_memory_capacity = 1'000'000;
+    problem.slow_memory_bandwidth = 1'000'000'000;
+    problem.native_granularity = {.width = 128, .height = 128, .depth = 128};
+
+    mlsys::Subgraph sg;
+    sg.ops = {0, 1};
+    sg.tensors_to_retain = {};
+    sg.granularity = {.width = 128, .height = 128, .depth = 128};
+    sg.traversal_order = std::nullopt;
+    sg.subgraph_latency = 0.0;
+
+    mlsys::Solution solution{.subgraphs = {sg}};
+
+    mlsys::CostModel cost_model(problem);
+    auto estimated = cost_model.estimate(solution);
+
+    ASSERT_TRUE(estimated.ok()) << estimated.status().message();
+    EXPECT_NEAR(std::get<1>(estimated.value()), 2100.0, 1e-6);
+    EXPECT_NEAR(std::get<0>(estimated.value()).subgraphs[0].subgraph_latency, 2100.0, 1e-6);
+}
+
 } // namespace

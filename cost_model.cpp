@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <set>
@@ -47,13 +48,21 @@ struct SubgraphMeta {
     std::set<size_t> ephemeral_tensors;
 };
 
+struct SplitKInfo {
+    bool has_split_k = false;
+    int64_t full_k = 1;
+    std::set<size_t> output_tensors;
+    std::set<size_t> epilogue_tensors;
+    std::set<size_t> path_tensors;
+};
+
 struct OpStepRequirement {
     // Output tiles of this op required in the current execution step.
     std::vector<Tile> output_tiles;
 
     // Required reduction depth for this step.
     // Pointwise => 1
-    // MatMul final-output path => current k chunk
+    // MatMul split-k output path => current k chunk
     // MatMul intermediate path => full K
     int64_t req_k = 1;
 };
@@ -368,6 +377,82 @@ auto BuildSubgraphMeta(const Problem& problem, const Subgraph& subgraph,
     return meta;
 }
 
+auto BuildSplitKInfo(const Problem& problem, const SubgraphMeta& meta,
+                     const std::vector<int>& producer_op) -> StatusOr<SplitKInfo> {
+    SplitKInfo info;
+    std::set<size_t> visited;
+
+    auto add_matmul_output = [&](size_t tensor_idx, const Op& op) -> absl::Status {
+        int64_t const curr_full_k = problem.tensors[op.inputs[0]].width;
+        if (!info.has_split_k) {
+            info.has_split_k = true;
+            info.full_k = curr_full_k;
+        } else if (info.full_k != curr_full_k) {
+            return absl::InvalidArgumentError(
+                "CostModel: inconsistent split-k reduction sizes in one subgraph");
+        }
+
+        info.output_tensors.insert(tensor_idx);
+        info.path_tensors.insert(tensor_idx);
+        return absl::OkStatus();
+    };
+
+    std::function<StatusOr<bool>(size_t)> collect_from_tensor =
+        [&](size_t tensor_idx) -> StatusOr<bool> {
+        if (!visited.insert(tensor_idx).second) {
+            return info.path_tensors.contains(tensor_idx);
+        }
+        if (tensor_idx >= producer_op.size()) {
+            return false;
+        }
+
+        int const producer_idx = producer_op[tensor_idx];
+        if (producer_idx < 0 || !meta.op_set.contains(static_cast<size_t>(producer_idx))) {
+            return false;
+        }
+
+        const Op& op = problem.ops[static_cast<size_t>(producer_idx)];
+        if (op.op_type == "MatMul") {
+            auto status = add_matmul_output(tensor_idx, op);
+            if (!status.ok()) {
+                return status;
+            }
+            return true;
+        }
+
+        if (op.op_type != "Pointwise") {
+            return false;
+        }
+
+        bool reaches_split_k_matmul = false;
+        for (size_t input_idx : op.inputs) {
+            if (!meta.produced.contains(input_idx)) {
+                continue;
+            }
+            auto input_reaches = collect_from_tensor(input_idx);
+            if (!input_reaches.ok()) {
+                return input_reaches.status();
+            }
+            reaches_split_k_matmul = reaches_split_k_matmul || input_reaches.value();
+        }
+
+        if (reaches_split_k_matmul) {
+            info.epilogue_tensors.insert(tensor_idx);
+            info.path_tensors.insert(tensor_idx);
+        }
+        return reaches_split_k_matmul;
+    };
+
+    for (size_t out_tensor_idx : meta.final_outputs) {
+        auto reaches = collect_from_tensor(out_tensor_idx);
+        if (!reaches.ok()) {
+            return reaches.status();
+        }
+    }
+
+    return info;
+}
+
 struct SpatialGrid {
     int64_t tiles_w = 0;
     int64_t tiles_h = 0;
@@ -483,7 +568,10 @@ auto BuildNextRetainedSet(const Subgraph& subgraph, const SubgraphMeta& meta) ->
 auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
                              const SubgraphMeta& meta, const std::vector<int>& producer_op,
                              int64_t spatial_tile_linear_idx, int64_t tiles_w, int64_t k_start,
-                             int64_t k_size) -> StepRequirements {
+                             int64_t k_size, const std::set<size_t>& split_k_output_tensors,
+                             const std::set<size_t>& deferred_epilogue_tensors,
+                             const std::set<size_t>& split_k_path_tensors, bool is_last_k_step)
+    -> StepRequirements {
     StepRequirements reqs;
 
     // BFS-like queue of tiles to propagate backward through producer ops.
@@ -505,14 +593,6 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
     while (head < queue.size()) {
         Tile curr_tile = queue[head++];
 
-        // Any externally visible produced tensor touched in this step may need writeback.
-        // We do this here (rather than only at seed time) so fan-out tensors that are
-        // consumed both internally and externally are correctly accounted.
-        if (meta.boundary_outputs.contains(curr_tile.tensor_idx) &&
-            !meta.ephemeral_tensors.contains(curr_tile.tensor_idx)) {
-            AddTile(reqs.required_boundary_outputs, curr_tile);
-        }
-
         int const p_op_idx = producer_op[curr_tile.tensor_idx];
         // Graph input or malformed producer map: no local producer to continue with.
         if (p_op_idx < 0) {
@@ -526,6 +606,39 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
         }
 
         const Op& op = problem.ops[op_idx];
+        bool const defer_epilogue =
+            !is_last_k_step && deferred_epilogue_tensors.contains(curr_tile.tensor_idx);
+
+        if (op.op_type == "Pointwise" && defer_epilogue) {
+            // Pointwise epilogues run after their upstream split-k MatMul tile is complete,
+            // so non-final k steps bypass them and keep walking to the accumulating MatMul.
+            for (size_t in_tensor_idx : op.inputs) {
+                if (!meta.produced.contains(in_tensor_idx) ||
+                    !split_k_path_tensors.contains(in_tensor_idx)) {
+                    continue;
+                }
+
+                Tile in_tile{.tensor_idx = in_tensor_idx,
+                             .x0 = curr_tile.x0,
+                             .x1 = curr_tile.x1,
+                             .y0 = curr_tile.y0,
+                             .y1 = curr_tile.y1};
+                in_tile = ClipTileToTensor(problem, in_tile);
+                if (in_tile.area() > 0) {
+                    queue.push_back(in_tile);
+                }
+            }
+            continue;
+        }
+
+        // Any externally visible produced tensor touched in this step may need writeback.
+        // We do this here (rather than only at seed time) so fan-out tensors that are
+        // consumed both internally and externally are correctly accounted. Deferred pointwise
+        // epilogues do not produce their outputs until the final k step.
+        if (meta.boundary_outputs.contains(curr_tile.tensor_idx) &&
+            !meta.ephemeral_tensors.contains(curr_tile.tensor_idx)) {
+            AddTile(reqs.required_boundary_outputs, curr_tile);
+        }
 
         // Record this op's output footprint for compute-time aggregation.
         OpStepRequirement& op_req = reqs.op_requirements[op_idx];
@@ -539,8 +652,8 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
             size_t const lhs_idx = op.inputs[0];
             int64_t const full_k = problem.tensors[lhs_idx].width;
 
-            bool const is_final_output_tensor = meta.final_outputs.contains(curr_tile.tensor_idx);
-            req_k = is_final_output_tensor ? k_size : full_k;
+            bool const uses_split_k = split_k_output_tensors.contains(curr_tile.tensor_idx);
+            req_k = uses_split_k ? k_size : full_k;
         }
         op_req.req_k = std::max(op_req.req_k, req_k);
 
@@ -574,12 +687,13 @@ auto CollectStepRequirements(const Problem& problem, const Subgraph& subgraph,
             size_t const rhs_idx = op.inputs[1];
 
             int64_t const full_inner_k = problem.tensors[lhs_idx].width;
-            bool const is_final_output_tensor = meta.final_outputs.contains(curr_tile.tensor_idx);
+            bool const uses_split_k = split_k_output_tensors.contains(curr_tile.tensor_idx);
 
-            // Final-output MatMul uses split-k range for this step.
+            // Split-k MatMul uses this step's k range. That includes final MatMul
+            // outputs and MatMuls feeding a deferred pointwise epilogue.
             // Intermediate MatMul uses full K because it must be fully reduced before use.
-            int64_t const k0 = is_final_output_tensor ? k_start : 0;
-            int64_t const k1 = is_final_output_tensor ? (k_start + k_size) : full_inner_k;
+            int64_t const k0 = uses_split_k ? k_start : 0;
+            int64_t const k1 = uses_split_k ? (k_start + k_size) : full_inner_k;
 
             // MatMul mapping (height is y axis, width is x axis):
             // lhs[h, k], rhs[k, w], out[h, w]
@@ -1016,48 +1130,23 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
     // Maps loop index -> spatial tile id in traversal sequence.
     const std::vector<int64_t>& traversal_order = traversal_order_or.value();
 
-    // Split-k analysis on final outputs.
-    // If final outputs are MatMul-produced and depth < full K, each spatial tile has multiple k
-    // steps.
-    int64_t split_k_full = 1; // Shared full-K among final MatMul outputs.
-    bool has_final_matmul = false;
-    std::set<size_t> split_k_output_tensors;
-
-    // We use the same split-k traversal for all final outputs, so we must check they are
-    // compatible.
-    for (size_t out_tensor_idx : meta.final_outputs) {
-        int const p_op_idx = producer_op_[out_tensor_idx];
-        // Defensive guard for malformed producer maps.
-        if (p_op_idx < 0) {
-            continue;
-        }
-
-        const Op& p_op = problem_.ops[static_cast<size_t>(p_op_idx)];
-        if (p_op.op_type != "MatMul") {
-            continue;
-        }
-
-        has_final_matmul = true;
-        split_k_output_tensors.insert(out_tensor_idx);
-        int64_t const curr_full_k = problem_.tensors[p_op.inputs[0]].width;
-
-        if (split_k_full == 1) {
-            split_k_full = curr_full_k;
-        } else if (split_k_full != curr_full_k) {
-            return absl::InvalidArgumentError(
-                "CostModel: inconsistent final MatMul reduction sizes in one subgraph");
-        }
+    // Split-k analysis on final outputs. A final MatMul output can split directly;
+    // a final Pointwise output can split as an epilogue over an internal MatMul.
+    auto split_k_info_or = BuildSplitKInfo(problem_, meta, producer_op_);
+    if (!split_k_info_or.ok()) {
+        return split_k_info_or.status();
     }
+    SplitKInfo const split_k_info = split_k_info_or.value();
 
     int64_t num_k_steps = 1;
-    if (has_final_matmul) {
-        num_k_steps = CeilDiv(split_k_full, subgraph.granularity.depth);
+    if (split_k_info.has_split_k) {
+        num_k_steps = CeilDiv(split_k_info.full_k, subgraph.granularity.depth);
     }
 
     // Output accumulators that must stay resident between k slices of the same spatial tile.
     std::set<size_t> locked_split_k_output_tensors;
     if (num_k_steps > 1) {
-        locked_split_k_output_tensors = split_k_output_tensors;
+        locked_split_k_output_tensors = split_k_info.output_tensors;
     }
 
     // Retained tensors still affect memory writeback accounting for this subgraph.
@@ -1078,16 +1167,20 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
             int64_t k_start = 0; // inclusive K index for this step
             int64_t k_size = 1;  // number of K elements in this step
 
-            if (has_final_matmul) {
+            bool const is_last_k_step = (k_step_idx == (num_k_steps - 1));
+
+            if (split_k_info.has_split_k) {
                 k_start = k_step_idx * subgraph.granularity.depth;
                 // Tail split-k chunk can be smaller when full_k is not divisible by depth.
-                k_size = std::min<int64_t>(subgraph.granularity.depth, split_k_full - k_start);
+                k_size =
+                    std::min<int64_t>(subgraph.granularity.depth, split_k_info.full_k - k_start);
             }
 
             // Backward-propagated tile requirements for this exact (spatial,k) step.
-            StepRequirements const reqs =
-                CollectStepRequirements(problem, subgraph, meta, producer_op_, spatial_tile_idx,
-                                        grid.tiles_w, k_start, k_size);
+            StepRequirements const reqs = CollectStepRequirements(
+                problem, subgraph, meta, producer_op_, spatial_tile_idx, grid.tiles_w, k_start,
+                k_size, split_k_info.output_tensors, split_k_info.epilogue_tensors,
+                split_k_info.path_tensors, is_last_k_step);
             // Arithmetic component for this step.
             double const step_compute_time =
                 ComputeStepComputeTime(problem_, subgraph, reqs.op_requirements);
@@ -1103,8 +1196,6 @@ auto CostModel::estimate_subgraph(const Solution& solution, size_t sg_idx,
             // Slow-memory reads needed by boundary inputs that are not fully resident.
             int64_t const memory_in_elements =
                 ComputeMissingArea(problem_, reqs.required_boundary_inputs, resident_at_step);
-
-            bool const is_last_k_step = (k_step_idx == (num_k_steps - 1));
 
             // Boundary outputs written this step.
             // Suppress write for retained outputs and intermediate split-k accumulations.

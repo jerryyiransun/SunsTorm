@@ -62,8 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout-seconds",
         type=float,
-        default=60.0,
-        help="Timeout in seconds for each benchmark run (default: 60)",
+        default=None,
+        help="Override timeout in seconds for every benchmark (default: benchmark-specific)",
     )
     parser.add_argument(
         "--solver",
@@ -96,9 +96,38 @@ def run_command_capture(command: list[str], cwd: Path) -> subprocess.CompletedPr
 
 
 def benchmark_sort_key(path: Path) -> tuple[int, str]:
+    benchmark_number = benchmark_number_from_path(path)
+    return benchmark_number if benchmark_number is not None else sys.maxsize, path.name
+
+
+def benchmark_number_from_path(path: Path) -> int | None:
     match = re.search(r"(\d+)$", path.stem)
-    benchmark_number = int(match.group(1)) if match else sys.maxsize
-    return benchmark_number, path.name
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def default_timeout_for_benchmark(path: Path) -> float:
+    benchmark_number = benchmark_number_from_path(path)
+    if benchmark_number is None:
+        return 60.0
+    if 1 <= benchmark_number <= 4:
+        return 2.0
+    if 5 <= benchmark_number <= 8:
+        return 5.0
+    if 9 <= benchmark_number <= 12:
+        return 15.0
+    if 13 <= benchmark_number <= 16:
+        return 30.0
+    if 17 <= benchmark_number <= 20:
+        return 60.0
+    if 21 <= benchmark_number <= 24:
+        return 120.0
+    return 60.0
+
+
+def timeout_for_benchmark(path: Path, override_seconds: float | None) -> float:
+    return override_seconds if override_seconds is not None else default_timeout_for_benchmark(path)
 
 
 def discover_benchmarks(benchmark_dir: Path) -> list[Path]:
@@ -151,12 +180,12 @@ def write_report(report_path: Path, run_dir: Path, rows: list[dict[str, str]]) -
         f"Run directory: `{run_dir}`",
         f"Solver: `{rows[0]['solver'] if rows else 'unknown'}`",
         "",
-        "| Benchmark | Solver | Status | Total Latency | Execution Time (s) | Solution JSON |",
-        "| --- | --- | --- | ---: | ---: | --- |",
+        "| Benchmark | Solver | Status | Timeout (s) | Total Latency | Execution Time (s) | Solution JSON |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
         lines.append(
-            f"| {row['benchmark']} | {row['solver']} | {row['status']} | {row['total_latency']} | {row['execution_time_seconds']} | {row['solution_path']} |"
+            f"| {row['benchmark']} | {row['solver']} | {row['status']} | {row['timeout_seconds']} | {row['total_latency']} | {row['execution_time_seconds']} | {row['solution_path']} |"
         )
     report_path.write_text("\n".join(lines) + "\n", encoding="ascii")
 
@@ -170,10 +199,10 @@ def main() -> int:
     run_dir = args.run_dir.resolve() if args.run_dir is not None else runs_dir / make_timestamp()
     output_dir = args.output_dir.resolve() if args.output_dir is not None else run_dir / "solutions"
     report_path = args.report_path.resolve() if args.report_path is not None else run_dir / "report.md"
-    timeout_seconds = args.timeout_seconds
+    timeout_override_seconds = args.timeout_seconds
     solver = normalize_solver_choice(args.solver)
 
-    if timeout_seconds <= 0:
+    if timeout_override_seconds is not None and timeout_override_seconds <= 0:
         print("--timeout-seconds must be greater than 0", file=sys.stderr)
         return 1
 
@@ -226,7 +255,12 @@ def main() -> int:
     for benchmark in benchmarks:
         output_name = f"{benchmark.stem}-solution.json"
         output_path = output_dir / output_name
-        print(f"Running {benchmark.name} -> {output_path}", flush=True)
+        timeout_seconds = timeout_for_benchmark(benchmark, timeout_override_seconds)
+        timeout_label = f"{timeout_seconds:g}"
+        print(
+            f"Running {benchmark.name} -> {output_path} (timeout={timeout_label}s)",
+            flush=True,
+        )
         start_time = time.perf_counter()
         try:
             solver_command = [str(executable), solver, str(benchmark), str(output_path)]
@@ -244,6 +278,7 @@ def main() -> int:
                     "benchmark": benchmark.name,
                     "solver": solver,
                     "status": "completed",
+                    "timeout_seconds": timeout_label,
                     "total_latency": total_latency,
                     "execution_time_seconds": f"{execution_time_seconds:.6f}",
                     "solution_path": str(output_path),
@@ -264,6 +299,7 @@ def main() -> int:
                     "benchmark": benchmark.name,
                     "solver": solver,
                     "status": f"failed (exit {exc.returncode})",
+                    "timeout_seconds": timeout_label,
                     "total_latency": total_latency,
                     "execution_time_seconds": f"{execution_time_seconds:.6f}",
                     "solution_path": str(output_path),
@@ -283,6 +319,7 @@ def main() -> int:
                     "benchmark": benchmark.name,
                     "solver": solver,
                     "status": "timed out",
+                    "timeout_seconds": timeout_label,
                     "total_latency": total_latency,
                     "execution_time_seconds": f"{execution_time_seconds:.6f}",
                     "solution_path": str(output_path),
@@ -292,7 +329,7 @@ def main() -> int:
                 (
                     f"Benchmark run timed out for {benchmark.name} "
                     f"after {execution_time_seconds:.6f}s "
-                    f"(timeout={timeout_seconds:.6f}s, total_latency={total_latency})"
+                    f"(timeout={timeout_label}s, total_latency={total_latency})"
                 ),
                 file=sys.stderr,
             )

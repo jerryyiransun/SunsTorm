@@ -15,7 +15,7 @@
 #include <string>
 #include <thread>
 
-#if defined(__unix__)
+#if defined(__unix__) || defined(__APPLE__)
 #include <csignal>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -149,7 +149,7 @@ TEST(SolutionWriterTest, StopFlushesDirtySolutionBeforeDelayExpires) {
     std::filesystem::remove_all(dir);
 }
 
-#if defined(__unix__)
+#if defined(__unix__) || defined(__APPLE__)
 TEST(SolutionWriterTest, GreedyBaselineSurvivesSigtermAfterBaselineWrite) {
     std::filesystem::path const dir = UniqueTempDir();
     std::filesystem::path const output_path = dir / "solution.json";
@@ -162,6 +162,55 @@ TEST(SolutionWriterTest, GreedyBaselineSurvivesSigtermAfterBaselineWrite) {
     if (child == 0) {
         setenv("MLSYS_GREEDY_TEST_PAUSE_AFTER_BASELINE", marker_path.string().c_str(), 1);
         mlsys::GreedySolver solver(output_path.string());
+        auto solution = solver.solve(problem);
+        _exit(solution.ok() ? 0 : 2);
+    }
+
+    bool baseline_ready = false;
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto solution = mlsys::ReadSolution(output_path.string());
+        if (std::filesystem::exists(marker_path) && solution.ok()) {
+            baseline_ready = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    if (!baseline_ready) {
+        kill(child, SIGTERM);
+        int ignored_status = 0;
+        waitpid(child, &ignored_status, 0);
+    }
+    ASSERT_TRUE(baseline_ready) << "Timed out waiting for baseline solution file";
+
+    ASSERT_EQ(kill(child, SIGTERM), 0);
+    int child_status = 0;
+    ASSERT_EQ(waitpid(child, &child_status, 0), child);
+    ASSERT_TRUE(WIFSIGNALED(child_status));
+    EXPECT_EQ(WTERMSIG(child_status), SIGTERM);
+
+    auto solution = mlsys::ReadSolution(output_path.string());
+    ASSERT_TRUE(solution.ok()) << solution.status().message();
+
+    auto eval = mlsys::Evaluate(problem, solution.value());
+    ASSERT_TRUE(eval.ok()) << eval.status().message();
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST(SolutionWriterTest, HeuristicBaselineSurvivesSigtermAfterBaselineWrite) {
+    std::filesystem::path const dir = UniqueTempDir();
+    std::filesystem::path const output_path = dir / "solution.json";
+    std::filesystem::path const marker_path = dir / "baseline.marker";
+    mlsys::Problem problem = mlsys::test::MakeSinglePointwiseProblem(64, 64);
+
+    pid_t const child = fork();
+    ASSERT_GE(child, 0);
+
+    if (child == 0) {
+        setenv("MLSYS_TEST_PAUSE_AFTER_BASELINE", marker_path.string().c_str(), 1);
+        mlsys::HeuristicSolver solver(output_path.string());
         auto solution = solver.solve(problem);
         _exit(solution.ok() ? 0 : 2);
     }
