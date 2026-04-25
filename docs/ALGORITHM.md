@@ -55,7 +55,7 @@ state, the fuser considers pairs $(S_p,S_c)$ where a producer subgraph produces
 tensors consumed by a later consumer subgraph. Let
 
 $$
-T_{p,c} = \operatorname{produced}(S_p) \cap \operatorname{consumed}(S_c).
+T_{p,c} = \mathrm{produced}(S_p) \cap \mathrm{consumed}(S_c).
 $$
 
 For each non-empty $T_{p,c}$, two moves are generated:
@@ -70,7 +70,7 @@ full tiling and exact latency evaluation. For direct fusion,
 
 $$
 \Delta_{\mathrm{fuse}} =
-2 \cdot \operatorname{internalized}(S_p,S_c),
+2 \cdot \mathrm{internalized}(S_p,S_c),
 $$
 
 because a newly internalized tensor can avoid one slow-memory write and one later
@@ -91,14 +91,14 @@ uses
 
 $$
 P_{\mathrm{fuse}} =
-1 + \frac{\operatorname{boundary}(S_p \cup S_c)}{C},
+1 + \frac{\mathrm{boundary}(S_p \cup S_c)}{C},
 $$
 
 while retention uses
 
 $$
 P_{\mathrm{retain}} =
-1 + 0.15\cdot(\operatorname{span}(S_p,S_c)-1)
+1 + 0.15\cdot(\mathrm{span}(S_p,S_c)-1)
   + \frac{\sum_{t\in T_{p,c}} W_tH_t}{C}.
 $$
 
@@ -106,7 +106,7 @@ The raw potential is
 
 $$
 \phi(m)=
-\max\left(1,\operatorname{round}\left(\frac{D(\Delta,T)}{P_m}\right)\right),
+\max\left(1,\mathrm{round}\left(\frac{D(\Delta,T)}{P_m}\right)\right),
 $$
 
 with non-positive or non-finite scores discarded. Before beam evaluation, the
@@ -114,7 +114,7 @@ ranker applies a learned discouragement factor for ops that repeatedly appear in
 high-ranked candidates that do not improve latency:
 
 $$
-\operatorname{rank}(m)=
+\mathrm{rank}(m)=
 \frac{\phi(m)}{1+\alpha \cdot h(m)},
 $$
 
@@ -179,8 +179,8 @@ next subgraph or are intermediate split-k accumulators before the final k step.
 For each step,
 
 $$
-M_q = \frac{\operatorname{read\_area}(I_q) +
-             \operatorname{write\_area}(O_q)}{B},
+M_q = \frac{\mathrm{read\_area}(I_q) +
+             \mathrm{write\_area}(O_q)}{B},
 $$
 
 where $B$ is `slow_memory_bandwidth`. Compute time is
