@@ -1,6 +1,12 @@
-# Build inside Ubuntu 22.04 amd64
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build inside Ubuntu 22.04 amd64.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 docker run --rm --platform=linux/amd64 \
-    -v "$PWD":/work -w /work \
+    -v "${REPO_ROOT}":/work -w /work \
     ubuntu:22.04 bash -lc '
 set -e
 apt-get update

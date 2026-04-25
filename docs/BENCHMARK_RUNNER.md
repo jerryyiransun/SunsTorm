@@ -1,13 +1,13 @@
 # Benchmark Runner
 
-`build_and_run_benchmarks.py` is a convenience script for building the local
+`scripts/build_and_run_benchmarks.py` is a convenience script for building the local
 benchmark tooling in Release mode, running one solver across every benchmark JSON,
 evaluating each generated solution, and writing a Markdown summary report.
 
 Use it from the repository root:
 
 ```bash
-python3 build_and_run_benchmarks.py
+python3 scripts/build_and_run_benchmarks.py
 ```
 
 The default command:
@@ -37,39 +37,39 @@ The script invokes CMake itself, so you do not need to manually create
 Run all benchmarks with the default greedy solver:
 
 ```bash
-python3 build_and_run_benchmarks.py
+python3 scripts/build_and_run_benchmarks.py
 ```
 
 Run all benchmarks with another solver:
 
 ```bash
-python3 build_and_run_benchmarks.py --solver heuristic
-python3 build_and_run_benchmarks.py --solver base
-python3 build_and_run_benchmarks.py --solver brute_force
+python3 scripts/build_and_run_benchmarks.py --solver heuristic
+python3 scripts/build_and_run_benchmarks.py --solver base
+python3 scripts/build_and_run_benchmarks.py --solver brute_force
 ```
 
 Use a single timeout for every benchmark:
 
 ```bash
-python3 build_and_run_benchmarks.py --timeout-seconds 30
+python3 scripts/build_and_run_benchmarks.py --timeout-seconds 30
 ```
 
 Write this run into a fixed directory:
 
 ```bash
-python3 build_and_run_benchmarks.py --run-dir build-release/runs/manual-check
+python3 scripts/build_and_run_benchmarks.py --run-dir build-release/runs/manual-check
 ```
 
 Use a different benchmark directory:
 
 ```bash
-python3 build_and_run_benchmarks.py --benchmark-dir path/to/benchmarks
+python3 scripts/build_and_run_benchmarks.py --benchmark-dir path/to/benchmarks
 ```
 
 Enable a custom fuser log directory for `run_solver`:
 
 ```bash
-python3 build_and_run_benchmarks.py --fuser-log-dir logs
+python3 scripts/build_and_run_benchmarks.py --fuser-log-dir logs
 ```
 
 `--fuser-log-dir` is passed through to `run_solver`. Logging still depends on
