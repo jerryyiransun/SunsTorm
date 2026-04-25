@@ -40,14 +40,33 @@ enable_testing()
 # Define a common library for shared logic
 add_library(mlsys_lib STATIC
     mlsys.cpp
-    fuser.cpp
-    fuser_logging.cpp
-    tiler.cpp
-    cost_model.cpp
-    solver.cpp
-    solution_writer.cpp
+    src/cost_model/cost_model.cpp
+    src/fusers/brute_force_fuser.cpp
+    src/fusers/fuser_common.cpp
+    src/fusers/greedy_fuser.cpp
+    src/fusers/greedy_fuser_scoring.cpp
+    src/fusers/greedy_fuser_search.cpp
+    src/io/solution_writer.cpp
+    src/logging/fuser_logging.cpp
+    src/solvers/base_solver.cpp
+    src/solvers/brute_force_solver.cpp
+    src/solvers/greedy_solver.cpp
+    src/solvers/heuristic_solver.cpp
+    src/solvers/solver_common.cpp
+    src/tilers/brute_force_tiler.cpp
+    src/tilers/cost_guided_divisor_tiler.cpp
+    src/tilers/greedy_tiler.cpp
+    src/tilers/tiler_common.cpp
 )
-target_include_directories(mlsys_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mlsys_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/cost_model
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/fusers
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/io
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/logging
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/tilers
+)
 target_compile_definitions(mlsys_lib PUBLIC
     MLSYS_ENABLE_FUSER_LOGGING=$<BOOL:${MLSYS_ENABLE_FUSER_LOGGING}>
 )
@@ -64,11 +83,11 @@ add_executable(mlsys main.cpp)
 target_link_libraries(mlsys PRIVATE mlsys_lib)
 
 # Local runner with solver selection + optional logging flags
-add_executable(run_solver run_solver_main.cpp)
+add_executable(run_solver tools/run_solver_main.cpp)
 target_link_libraries(run_solver PRIVATE mlsys_lib)
 
 # Debug-focused evaluator runner
-add_executable(evaluate_debug evaluate_debug.cpp)
+add_executable(evaluate_debug tools/evaluate_debug.cpp)
 target_link_libraries(evaluate_debug PRIVATE mlsys_lib)
 
 include(GoogleTest)
@@ -82,12 +101,12 @@ function(add_mlsys_test target)
     gtest_discover_tests(${target})
 endfunction()
 
-add_mlsys_test(evaluate_test evaluate_test.cpp)
-add_mlsys_test(tiler_test tiler_test.cpp)
-add_mlsys_test(fuser_test fuser_test.cpp)
-add_mlsys_test(cost_model_test cost_model_test.cpp)
-add_mlsys_test(solver_test solver_test.cpp)
-add_mlsys_test(solution_writer_test solution_writer_test.cpp)
+add_mlsys_test(evaluate_test tests/evaluate_test.cpp)
+add_mlsys_test(tiler_test tests/tiler_test.cpp)
+add_mlsys_test(fuser_test tests/fuser_test.cpp)
+add_mlsys_test(cost_model_test tests/cost_model_test.cpp)
+add_mlsys_test(solver_test tests/solver_test.cpp)
+add_mlsys_test(solution_writer_test tests/solution_writer_test.cpp)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(mlsys_lib PRIVATE DEBUG)

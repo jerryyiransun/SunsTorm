@@ -1,4 +1,4 @@
-#include "fuser.h"
+#include "fuser_common.h"
 #include "fuser_logging.h"
 
 #include <algorithm>
@@ -24,9 +24,7 @@
 #include "cost_model.h"
 #include "tiler.h"
 
-namespace mlsys {
-
-namespace {
+namespace mlsys::fuser_internal {
 
 #if MLSYS_ENABLE_FUSER_LOGGING
 #define MLSYS_FUSER_LOG_ARGS(...) , __VA_ARGS__
@@ -1893,14 +1891,11 @@ void EnumerateSchedules(const Problem& problem, const std::vector<int>& producer
     }
 }
 
-#undef MLSYS_FUSER_LOG_ARGS
-
-} // namespace
-
-auto ScoreGreedyPotentialForTesting(GreedyPotentialScorer potential_scorer, int64_t saved_elements,
-                                    size_t shared_tensor_count, bool is_retain, size_t retain_span,
-                                    int64_t retained_elements, int64_t fast_memory_capacity,
-                                    int64_t direct_boundary_elements) -> int64_t {
+auto ScoreGreedyPotentialForTestingImpl(GreedyPotentialScorer potential_scorer,
+                                        int64_t saved_elements, size_t shared_tensor_count,
+                                        bool is_retain, size_t retain_span,
+                                        int64_t retained_elements, int64_t fast_memory_capacity,
+                                        int64_t direct_boundary_elements) -> int64_t {
     switch (potential_scorer) {
     case GreedyPotentialScorer::kLegacyAverage:
         return DivideByTensorCount(saved_elements, shared_tensor_count);
@@ -1921,33 +1916,19 @@ auto ScoreGreedyPotentialForTesting(GreedyPotentialScorer potential_scorer, int6
     return 0;
 }
 
-GreedyFuser::GreedyFuser(GreedyFuserConfig config)
-    : GreedyFuser(config, std::make_unique<GreedyTiler>()) {}
-
-GreedyFuser::GreedyFuser(GreedyFuserConfig config, BestSolutionCallback best_solution_callback)
-    : GreedyFuser(config, std::make_unique<GreedyTiler>(), std::move(best_solution_callback)) {}
-
-GreedyFuser::GreedyFuser(GreedyFuserConfig config, std::unique_ptr<Tiler> tiler)
-    : GreedyFuser(config, std::move(tiler), nullptr) {}
-
-GreedyFuser::GreedyFuser(GreedyFuserConfig config, std::unique_ptr<Tiler> tiler,
-                         BestSolutionCallback best_solution_callback)
-    : config_(config), tiler_(std::move(tiler)),
-      best_solution_callback_(std::move(best_solution_callback)) {}
-
-GreedyFuser::~GreedyFuser() = default;
-
-auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
-    if (config_.search_depth < 0) {
+auto RunGreedyFuser(const GreedyFuserConfig& config, Tiler* tiler,
+                    BestSolutionCallback best_solution_callback, const Problem& problem)
+    -> StatusOr<Solution> {
+    if (config.search_depth < 0) {
         return absl::InvalidArgumentError("search_depth must be non-negative");
     }
-    if (config_.beam_width <= 0) {
+    if (config.beam_width <= 0) {
         return absl::InvalidArgumentError("beam_width must be positive");
     }
-    if (config_.topk_failure_penalty < 0.0) {
+    if (config.topk_failure_penalty < 0.0) {
         return absl::InvalidArgumentError("topk_failure_penalty must be non-negative");
     }
-    if (tiler_ == nullptr) {
+    if (tiler == nullptr) {
         return absl::InvalidArgumentError("tiler must not be null");
     }
     if (problem.ops.empty()) {
@@ -1971,10 +1952,10 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
         .problem = problem,
         .producer_op = producer_op,
         .topo = topo,
-        .tiler = tiler_.get(),
-        .potential_scorer = config_.potential_scorer,
+        .tiler = tiler,
+        .potential_scorer = config.potential_scorer,
         .cost_model = CostModel(problem),
-        .best_solution_callback = best_solution_callback_,
+        .best_solution_callback = best_solution_callback,
     };
 
     GreedyCandidate root_candidate{
@@ -1994,7 +1975,7 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
     double const initial_cost = root_evaluation.valid ? root_evaluation.total_latency
                                                       : std::numeric_limits<double>::infinity();
     auto search_status =
-        RunGreedyLookaheadSearch(config_, context, initial_solution, root_evaluated_solution,
+        RunGreedyLookaheadSearch(config, context, initial_solution, root_evaluated_solution,
                                  root_evaluation.valid, initial_cost);
     if (!search_status.ok()) {
         return search_status;
@@ -2007,7 +1988,7 @@ auto GreedyFuser::fuse(const Problem& problem) -> StatusOr<Solution> {
     return context.best_solution;
 }
 
-auto BruteForceFuser::fuse(const Problem& problem) -> StatusOr<std::vector<Solution>> {
+auto RunBruteForceFuser(const Problem& problem) -> StatusOr<std::vector<Solution>> {
     std::vector<Solution> results;
     size_t const num_ops = problem.ops.size();
     if (num_ops == 0) {
@@ -2075,4 +2056,4 @@ auto BruteForceFuser::fuse(const Problem& problem) -> StatusOr<std::vector<Solut
     return results;
 }
 
-} // namespace mlsys
+} // namespace mlsys::fuser_internal

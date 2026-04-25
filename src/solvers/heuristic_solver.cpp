@@ -1,28 +1,18 @@
-#include "absl/memory/memory.h"
-#include "absl/status/status.h"
-#include "absl/status/statusor.h"
-#include "absl/types/optional.h"
-#include "absl/types/variant.h"
+#include "solver.h"
 
 #include "cost_model.h"
-#include "fuser.h"
-#include "mlsys.h"
 #include "solution_writer.h"
-#include "solver.h"
+#include "solver_common.h"
 #include "tiler.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <fstream>
-#include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
-#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -30,7 +20,6 @@
 using namespace std;
 
 namespace mlsys {
-
 namespace {
 
 struct IntervalPlan {
@@ -139,36 +128,6 @@ auto MaxFusionWidthForProblem(const Problem& problem) -> size_t {
     return selected_width;
 }
 
-auto GreedyConfigForProblem(size_t num_ops) -> GreedyFuserConfig {
-    constexpr double kTopKFailurePenalty = 0.08;
-    if (num_ops <= 5) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 24) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 32) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 64) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 128) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 256) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    return GreedyFuserConfig{
-        .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-}
-
 auto BuildSingletonSolution(const Problem& problem) -> absl::StatusOr<Solution> {
     Solution solution;
     for (size_t i = 0; i < problem.ops.size(); ++i) {
@@ -187,92 +146,7 @@ auto BuildSingletonSolution(const Problem& problem) -> absl::StatusOr<Solution> 
     return tiled.value();
 }
 
-void MaybePauseAfterBaselineForTest() {
-    const char* marker_path = std::getenv("MLSYS_TEST_PAUSE_AFTER_BASELINE");
-    if (marker_path == nullptr || std::string(marker_path).empty()) {
-        marker_path = std::getenv("MLSYS_GREEDY_TEST_PAUSE_AFTER_BASELINE");
-    }
-    if (marker_path == nullptr || std::string(marker_path).empty()) {
-        return;
-    }
-
-    std::ofstream marker(marker_path);
-    marker << "baseline_written\n";
-    marker.close();
-
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-}
-
 } // namespace
-
-auto BaseSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
-    Solution solution;
-
-    // The baseline solver schedules each operation individually in topological order
-    // and delegates tile selection to the greedy tiler.
-    for (size_t i = 0; i < problem.ops.size(); ++i) {
-        Subgraph sg;
-        sg.ops.push_back(i);
-        sg.tensors_to_retain = {};
-        sg.traversal_order = nullopt;
-
-        solution.subgraphs.push_back(sg);
-    }
-
-    unique_ptr<Tiler> tiler = make_unique<CostGuidedDivisorTiler>();
-    auto tiled_solution = tiler->tile(problem, solution);
-    if (!tiled_solution.ok()) {
-        return tiled_solution.status();
-    }
-
-    unique_ptr<CostModel> cost_model = make_unique<CostModel>(problem);
-    auto estimated = cost_model->estimate(tiled_solution.value());
-    if (!estimated.ok()) {
-        return estimated.status();
-    }
-
-    return get<0>(estimated.value());
-}
-
-auto BruteForceSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
-    unique_ptr<BruteForceFuser> fuser = make_unique<BruteForceFuser>();
-    unique_ptr<Tiler> tiler = make_unique<BruteForceTiler>();
-    unique_ptr<CostModel> cost_model = make_unique<CostModel>(problem);
-
-    auto fusion_plans = fuser->fuse(problem);
-    if (!fusion_plans.ok()) {
-        return fusion_plans.status();
-    }
-
-    if (fusion_plans.value().empty()) {
-        return absl::InternalError("Fuser returned no fusion plans");
-    }
-
-    tuple<Solution, SubgraphLatency> optimal_plan;
-
-    for (const auto& plan : fusion_plans.value()) {
-        auto tiled_plan = tiler->tile(problem, plan);
-        if (!tiled_plan.ok()) {
-            // tile() returns an error when no valid tiling is available
-            continue;
-        }
-
-        auto solu = cost_model->estimate(tiled_plan.value());
-
-        if (optimal_plan == tuple<Solution, SubgraphLatency>() ||
-            get<1>(solu.value()) < get<1>(optimal_plan)) {
-            optimal_plan = solu.value();
-        }
-    }
-
-    if (optimal_plan == tuple<Solution, SubgraphLatency>()) {
-        return absl::InternalError("No valid plans found by fuser and tiler");
-    }
-
-    return get<0>(optimal_plan);
-}
 
 HeuristicSolver::HeuristicSolver(std::string anytime_output_path) {
     anytime_output_path_ = std::move(anytime_output_path);
@@ -336,7 +210,7 @@ auto HeuristicSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> 
         if (!publish_status.ok()) {
             return return_after_writer_stop(publish_status);
         }
-        MaybePauseAfterBaselineForTest();
+        solver_internal::MaybePauseAfterBaselineForTest();
     }
 
     std::vector<std::vector<IntervalPlan>> interval_plans(num_ops,
@@ -442,63 +316,6 @@ auto HeuristicSolver::solve(const Problem& problem) -> absl::StatusOr<Solution> 
     }
 
     return final_solution;
-}
-
-GreedySolver::GreedySolver()
-    : use_problem_sized_config_(true),
-      config_{.search_depth = 0, .beam_width = 0, .topk_failure_penalty = 0.0} {}
-
-GreedySolver::GreedySolver(std::string anytime_output_path) : GreedySolver() {
-    anytime_output_path_ = std::move(anytime_output_path);
-}
-
-GreedySolver::GreedySolver(GreedyFuserConfig config)
-    : use_problem_sized_config_(false), config_(config) {}
-
-GreedySolver::GreedySolver(GreedyFuserConfig config, std::string anytime_output_path)
-    : GreedySolver(config) {
-    anytime_output_path_ = std::move(anytime_output_path);
-}
-
-auto GreedySolver::solve(const Problem& problem) -> absl::StatusOr<Solution> {
-    GreedyFuserConfig const effective_config =
-        use_problem_sized_config_ ? GreedyConfigForProblem(problem.ops.size()) : config_;
-
-    if (!anytime_output_path_.has_value()) {
-        GreedyFuser fuser(effective_config);
-        return fuser.fuse(problem);
-    }
-
-    AnytimeSolutionWriter writer(*anytime_output_path_);
-    auto start_status = writer.Start();
-    if (!start_status.ok()) {
-        return start_status;
-    }
-
-    bool first_publish = true;
-    GreedyFuser fuser(effective_config,
-                      [&](const Solution& solution, TotalLatency cost) -> absl::Status {
-                          if (first_publish) {
-                              first_publish = false;
-                              auto status = writer.PublishAndWaitForWrite(solution, cost);
-                              if (status.ok()) {
-                                  MaybePauseAfterBaselineForTest();
-                              }
-                              return status;
-                          }
-                          return writer.PublishIfBetter(solution, cost);
-                      });
-
-    auto solution_status = fuser.fuse(problem);
-    auto stop_status = writer.StopAndFlush();
-    if (!solution_status.ok()) {
-        return solution_status.status();
-    }
-    if (!stop_status.ok()) {
-        return stop_status;
-    }
-
-    return solution_status.value();
 }
 
 } // namespace mlsys
