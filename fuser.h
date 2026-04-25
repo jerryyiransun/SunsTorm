@@ -12,10 +12,16 @@ using namespace absl;
 namespace mlsys {
 class Tiler;
 
+enum class GreedyPotentialScorer {
+    kLegacyAverage,
+    kMemoryTrafficDensity,
+};
+
 struct GreedyFuserConfig {
     int search_depth;
     int beam_width;
     double topk_failure_penalty;
+    GreedyPotentialScorer potential_scorer = GreedyPotentialScorer::kMemoryTrafficDensity;
 };
 
 using BestSolutionCallback = std::function<absl::Status(const Solution&, TotalLatency)>;
