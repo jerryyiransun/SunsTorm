@@ -1,4 +1,4 @@
-# MLSys 2026 Google Graph Scheduling Competition
+<h1 align="center">SunsTorm</h1>
 
 <p align="center">
   <a href="https://github.com/jerryyiransun/MLSys2026-Google-Graph-Scheduling-Competition/actions/workflows/ci.yaml">
