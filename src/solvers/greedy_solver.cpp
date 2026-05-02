@@ -5,7 +5,6 @@
 #include "solver_common.h"
 
 #include <cstddef>
-#include <limits>
 #include <string>
 #include <utility>
 
@@ -14,34 +13,15 @@ using namespace std;
 namespace mlsys {
 namespace {
 
+constexpr int kDefaultSearchDepth = 0;
+constexpr int kDefaultBeamWidth = 32;
+constexpr double kDefaultTopKFailurePenalty = 0.04;
+
 auto GreedyConfigForProblem(size_t num_ops) -> GreedyFuserConfig {
-    constexpr double kTopKFailurePenalty = 0.08;
-    if (num_ops <= 5) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 24) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 32) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 64) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 128) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    if (num_ops <= 256) {
-        return GreedyFuserConfig{
-            .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
-    }
-    return GreedyFuserConfig{
-        .search_depth = 4, .beam_width = 16, .topk_failure_penalty = kTopKFailurePenalty};
+    (void)num_ops;
+    return GreedyFuserConfig{.search_depth = kDefaultSearchDepth,
+                             .beam_width = kDefaultBeamWidth,
+                             .topk_failure_penalty = kDefaultTopKFailurePenalty};
 }
 
 } // namespace

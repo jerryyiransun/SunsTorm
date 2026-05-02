@@ -11,7 +11,7 @@ This repository contains our algorithm for Track A of the [MLSys 2026 Google Gra
 ## Prerequisites
 
 - **CMake** (Version 3.14 or higher)
-- **C++ Compiler** supporting C++17
+- **C++ Compiler** supporting C++20
 - **clang-format** (optional for formatting)
 - **Docker**
 
@@ -37,10 +37,19 @@ cmake --build build
 
 ## Local Runner (`run_solver`)
 
-Use `run_solver` for local experimentation when you want to choose a solver from the command line, this is meant for internal testing.
+Use `run_solver` for local experimentation when you want to choose a solver from
+the command line. This is meant for internal testing.
 
 ```bash
 ./build/run_solver <greedy|base|heuristic|brute_force> <input.json> <output.json> [--fuser-log-dir=<dir>]
+```
+
+The greedy solver also accepts:
+
+```bash
+--greedy-beam-width=<positive-int>
+--greedy-search-depth=<non-negative-int>
+--greedy-alpha=<non-negative-float>
 ```
 
 ## Benchmark Runner
@@ -50,6 +59,15 @@ solver across every benchmark JSON, and write timestamped solution files plus a
 Markdown report.
 
 See [BENCHMARK_RUNNER.md](docs/BENCHMARK_RUNNER.md).
+
+## Hyperparameter Sweep
+
+Use `scripts/run_hyperparameter_sweep.py` to run the greedy solver across the
+beam width, lookahead depth, and alpha grid in an Ubuntu 22.04 Docker envelope.
+Use `scripts/rank_hyperparameter_sweep.py` and
+`scripts/plot_hyperparameter_sweep.py` to summarize the generated index.
+
+See [HYPERPARAMETER_SWEEP.md](docs/HYPERPARAMETER_SWEEP.md).
 
 ## Docker Grading Smoke Test
 
@@ -94,6 +112,12 @@ See [DEBUG.md](docs/DEBUG.md)
 ## Profiling
 
 See [PROFILING.md](docs/PROFILING.md)
+
+## License
+
+This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+Third-party components fetched by CMake are listed in
+[THIRD_PARTY.md](docs/THIRD_PARTY.md).
 
 ## Git Hooks: clang-format pre-commit (optional)
 

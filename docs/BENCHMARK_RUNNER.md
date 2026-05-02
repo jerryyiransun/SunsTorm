@@ -75,6 +75,15 @@ python3 scripts/build_and_run_benchmarks.py --fuser-log-dir logs
 `--fuser-log-dir` is passed through to `run_solver`. Logging still depends on
 the binary being built with the relevant compile-time logging option.
 
+Run the greedy solver with explicit hyperparameters:
+
+```bash
+python3 scripts/build_and_run_benchmarks.py \
+  --greedy-beam-width 32 \
+  --greedy-search-depth 0 \
+  --greedy-alpha 0.04
+```
+
 ## Options
 
 | Option | Default | Description |
@@ -88,6 +97,9 @@ the binary being built with the relevant compile-time logging option.
 | `--timeout-seconds` | benchmark-specific | Override timeout for every benchmark. |
 | `--solver` | `greedy` | Solver passed to `run_solver`. |
 | `--fuser-log-dir` | `run_solver` default | Optional fuser log directory passed through to `run_solver`. |
+| `--greedy-beam-width` | `run_solver` default | Override greedy solver beam width. |
+| `--greedy-search-depth` | `run_solver` default | Override greedy solver lookahead depth. |
+| `--greedy-alpha` | `run_solver` default | Override greedy solver top-k failure penalty. |
 
 Accepted solver names are:
 
@@ -100,6 +112,8 @@ Accepted solver names are:
 
 The `bruteforce` and `brute-force` aliases are normalized to `brute_force`
 before invoking `run_solver`.
+
+Greedy hyperparameter flags can only be used with `--solver greedy`.
 
 ## Timeout Defaults
 

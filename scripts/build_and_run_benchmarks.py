@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import subprocess
 import sys
@@ -77,6 +78,24 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Fuser log directory passed to run_solver (default: run_solver default)",
+    )
+    parser.add_argument(
+        "--greedy-beam-width",
+        type=int,
+        default=None,
+        help="Override greedy solver beam width (positive integer)",
+    )
+    parser.add_argument(
+        "--greedy-search-depth",
+        type=int,
+        default=None,
+        help="Override greedy solver lookahead/search depth (non-negative integer)",
+    )
+    parser.add_argument(
+        "--greedy-alpha",
+        type=float,
+        default=None,
+        help="Override greedy solver top-k failure penalty alpha (non-negative float)",
     )
     return parser.parse_args()
 
@@ -169,6 +188,41 @@ def normalize_solver_choice(solver: str) -> str:
     return solver
 
 
+def has_greedy_overrides(args: argparse.Namespace) -> bool:
+    return (
+        args.greedy_beam_width is not None
+        or args.greedy_search_depth is not None
+        or args.greedy_alpha is not None
+    )
+
+
+def validate_greedy_overrides(args: argparse.Namespace, solver: str) -> bool:
+    if has_greedy_overrides(args) and solver != "greedy":
+        print("Greedy hyperparameter flags can only be used with --solver greedy", file=sys.stderr)
+        return False
+    if args.greedy_beam_width is not None and args.greedy_beam_width <= 0:
+        print("--greedy-beam-width must be greater than 0", file=sys.stderr)
+        return False
+    if args.greedy_search_depth is not None and args.greedy_search_depth < 0:
+        print("--greedy-search-depth must be greater than or equal to 0", file=sys.stderr)
+        return False
+    if args.greedy_alpha is not None and (
+        not math.isfinite(args.greedy_alpha) or args.greedy_alpha < 0
+    ):
+        print("--greedy-alpha must be a finite non-negative value", file=sys.stderr)
+        return False
+    return True
+
+
+def append_greedy_overrides(command: list[str], args: argparse.Namespace) -> None:
+    if args.greedy_beam_width is not None:
+        command.append(f"--greedy-beam-width={args.greedy_beam_width}")
+    if args.greedy_search_depth is not None:
+        command.append(f"--greedy-search-depth={args.greedy_search_depth}")
+    if args.greedy_alpha is not None:
+        command.append(f"--greedy-alpha={args.greedy_alpha:g}")
+
+
 def make_timestamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -205,6 +259,8 @@ def main() -> int:
 
     if timeout_override_seconds is not None and timeout_override_seconds <= 0:
         print("--timeout-seconds must be greater than 0", file=sys.stderr)
+        return 1
+    if not validate_greedy_overrides(args, solver):
         return 1
 
     if not benchmark_dir.is_dir():
@@ -267,6 +323,7 @@ def main() -> int:
             solver_command = [str(executable), solver, str(benchmark), str(output_path)]
             if args.fuser_log_dir is not None:
                 solver_command.append(f"--fuser-log-dir={args.fuser_log_dir.resolve()}")
+            append_greedy_overrides(solver_command, args)
             run_command_with_timeout(
                 solver_command,
                 cwd=repo_root,

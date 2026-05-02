@@ -43,10 +43,11 @@ flowchart TD
 ## Search Algorithm
 
 `GreedySolver` is the production path used by `mlsys`. It invokes `GreedyFuser`
-with search depth $d=4$, beam width $b=16$, and top-k failure penalty
-$\alpha=0.08$. The solver publishes the first valid baseline immediately through
-`AnytimeSolutionWriter`; every later publish must strictly improve the best exact
-total latency.
+with beam width $b=32$, lookahead depth $d=0$, and top-k failure penalty
+$\alpha=0.04$; $\alpha=0.16$ is an alternate tuned value with equivalent sweep
+results. The solver publishes the first valid baseline immediately through
+`AnytimeSolutionWriter`; every later publish must strictly improve the best
+exact total latency.
 
 The root state is a topological schedule with one subgraph per op, followed by a
 deterministic pre-fusion pass over unary pointwise chains. This pass is safe
