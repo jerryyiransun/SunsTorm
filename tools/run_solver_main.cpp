@@ -13,20 +13,35 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 using namespace mlsys;
 
 namespace {
+
+constexpr int kDefaultGreedySearchDepth = 0;
+constexpr int kDefaultGreedyBeamWidth = 32;
+constexpr double kDefaultGreedyAlpha = 0.04;
+constexpr std::string_view kFuserLogDirOption = "--fuser-log-dir=";
+constexpr std::string_view kGreedyBeamWidthOption = "--greedy-beam-width=";
+constexpr std::string_view kGreedySearchDepthOption = "--greedy-search-depth=";
+constexpr std::string_view kGreedyAlphaOption = "--greedy-alpha=";
 
 struct RunSolverOptions {
     std::string solver_choice;
     std::string input_path;
     std::string output_path;
     std::string fuser_log_dir = "logs";
+    std::optional<int> greedy_search_depth;
+    std::optional<int> greedy_beam_width;
+    std::optional<double> greedy_alpha;
 };
 
 enum class SolverKind {
@@ -38,8 +53,11 @@ enum class SolverKind {
 
 void PrintUsage() {
     std::cerr << "Usage: ./run_solver <solver> <path_to_input.json> <path_to_output.json> "
-                 "[--fuser-log-dir=<dir>]\n";
+                 "[--fuser-log-dir=<dir>] [--greedy-beam-width=<positive int>] "
+                 "[--greedy-search-depth=<non-negative int>] "
+                 "[--greedy-alpha=<non-negative float>]\n";
     std::cerr << "  solver: greedy | base | heuristic | brute_force\n";
+    std::cerr << "  greedy flags only apply to the greedy solver\n";
 }
 
 auto ToLower(std::string text) -> std::string {
@@ -85,18 +103,88 @@ auto SolverName(SolverKind kind) -> std::string {
     return "UnknownSolver";
 }
 
-auto BuildSolver(SolverKind kind, const std::string& output_path) -> std::unique_ptr<Solver> {
+auto BuildGreedyConfig(const RunSolverOptions& options) -> GreedyFuserConfig {
+    return GreedyFuserConfig{
+        .search_depth = options.greedy_search_depth.value_or(kDefaultGreedySearchDepth),
+        .beam_width = options.greedy_beam_width.value_or(kDefaultGreedyBeamWidth),
+        .topk_failure_penalty = options.greedy_alpha.value_or(kDefaultGreedyAlpha),
+    };
+}
+
+auto HasGreedyOverrides(const RunSolverOptions& options) -> bool {
+    return options.greedy_search_depth.has_value() || options.greedy_beam_width.has_value() ||
+           options.greedy_alpha.has_value();
+}
+
+auto BuildSolver(SolverKind kind, const RunSolverOptions& options) -> std::unique_ptr<Solver> {
     switch (kind) {
     case SolverKind::kGreedy:
-        return std::make_unique<GreedySolver>(output_path);
+        if (HasGreedyOverrides(options)) {
+            return std::make_unique<GreedySolver>(BuildGreedyConfig(options), options.output_path);
+        }
+        return std::make_unique<GreedySolver>(options.output_path);
     case SolverKind::kBase:
         return std::make_unique<BaseSolver>();
     case SolverKind::kHeuristic:
-        return std::make_unique<HeuristicSolver>(output_path);
+        return std::make_unique<HeuristicSolver>(options.output_path);
     case SolverKind::kBruteForce:
         return std::make_unique<BruteForceSolver>();
     }
     return nullptr;
+}
+
+auto ParseIntFlag(const std::string& flag_name, const std::string& value, int minimum,
+                  const std::string& expectation, int& parsed) -> bool {
+    try {
+        size_t parsed_chars = 0;
+        int const number = std::stoi(value, &parsed_chars);
+        if (parsed_chars != value.size() || number < minimum) {
+            std::cerr << "Invalid " << flag_name << " value: " << value << " (expected "
+                      << expectation << ")\n";
+            return false;
+        }
+        parsed = number;
+        return true;
+    } catch (const std::invalid_argument&) {
+        std::cerr << "Invalid " << flag_name << " value: " << value << " (expected " << expectation
+                  << ")\n";
+        return false;
+    } catch (const std::out_of_range&) {
+        std::cerr << "Invalid " << flag_name << " value: " << value << " (out of range)\n";
+        return false;
+    }
+}
+
+auto ParsePositiveIntFlag(const std::string& flag_name, const std::string& value, int& parsed)
+    -> bool {
+    return ParseIntFlag(flag_name, value, 1, "positive integer", parsed);
+}
+
+auto ParseNonNegativeIntFlag(const std::string& flag_name, const std::string& value, int& parsed)
+    -> bool {
+    return ParseIntFlag(flag_name, value, 0, "non-negative integer", parsed);
+}
+
+auto ParseNonNegativeDoubleFlag(const std::string& flag_name, const std::string& value,
+                                double& parsed) -> bool {
+    try {
+        size_t parsed_chars = 0;
+        double const number = std::stod(value, &parsed_chars);
+        if (parsed_chars != value.size() || !std::isfinite(number) || number < 0.0) {
+            std::cerr << "Invalid " << flag_name << " value: " << value
+                      << " (expected non-negative float)\n";
+            return false;
+        }
+        parsed = number;
+        return true;
+    } catch (const std::invalid_argument&) {
+        std::cerr << "Invalid " << flag_name << " value: " << value
+                  << " (expected non-negative float)\n";
+        return false;
+    } catch (const std::out_of_range&) {
+        std::cerr << "Invalid " << flag_name << " value: " << value << " (out of range)\n";
+        return false;
+    }
 }
 
 auto BenchmarkNameFromInputPath(const std::string& input_path) -> std::string {
@@ -120,12 +208,42 @@ auto ParseArgs(int argc, char* argv[], RunSolverOptions& options) -> bool {
     for (int i = 4; i < argc; ++i) {
         std::string const arg = argv[i];
 
-        if (arg.rfind("--fuser-log-dir=", 0) == 0) {
-            options.fuser_log_dir = arg.substr(std::string("--fuser-log-dir=").size());
+        if (arg.starts_with(kFuserLogDirOption)) {
+            options.fuser_log_dir = arg.substr(kFuserLogDirOption.size());
             if (options.fuser_log_dir.empty()) {
                 std::cerr << "Invalid --fuser-log-dir value: empty\n";
                 return false;
             }
+            continue;
+        }
+
+        if (arg.starts_with(kGreedyBeamWidthOption)) {
+            int parsed = 0;
+            if (!ParsePositiveIntFlag("--greedy-beam-width",
+                                      arg.substr(kGreedyBeamWidthOption.size()), parsed)) {
+                return false;
+            }
+            options.greedy_beam_width = parsed;
+            continue;
+        }
+
+        if (arg.starts_with(kGreedySearchDepthOption)) {
+            int parsed = 0;
+            if (!ParseNonNegativeIntFlag("--greedy-search-depth",
+                                         arg.substr(kGreedySearchDepthOption.size()), parsed)) {
+                return false;
+            }
+            options.greedy_search_depth = parsed;
+            continue;
+        }
+
+        if (arg.starts_with(kGreedyAlphaOption)) {
+            double parsed = 0.0;
+            if (!ParseNonNegativeDoubleFlag("--greedy-alpha", arg.substr(kGreedyAlphaOption.size()),
+                                            parsed)) {
+                return false;
+            }
+            options.greedy_alpha = parsed;
             continue;
         }
 
@@ -151,6 +269,10 @@ auto main(int argc, char* argv[]) -> int {
         PrintUsage();
         return 1;
     }
+    if (solver_kind != SolverKind::kGreedy && HasGreedyOverrides(options)) {
+        std::cerr << "Greedy hyperparameter flags can only be used with the greedy solver\n";
+        return 1;
+    }
 
     std::string const solver_name = SolverName(solver_kind);
     bool enable_fuser_logging = (solver_kind == SolverKind::kGreedy);
@@ -174,6 +296,12 @@ auto main(int argc, char* argv[]) -> int {
     std::cout << "Solver: " << solver_name << "\n";
     std::cout << "Input file: " << options.input_path << "\n";
     std::cout << "Output file: " << options.output_path << "\n";
+    if (solver_kind == SolverKind::kGreedy && HasGreedyOverrides(options)) {
+        GreedyFuserConfig const config = BuildGreedyConfig(options);
+        std::cout << "Greedy search depth: " << config.search_depth << "\n";
+        std::cout << "Greedy beam width: " << config.beam_width << "\n";
+        std::cout << "Greedy alpha: " << config.topk_failure_penalty << "\n";
+    }
 
     if (logging_config.enable_logging) {
         std::string const log_path = GetFuserLogPath();
@@ -192,7 +320,7 @@ auto main(int argc, char* argv[]) -> int {
     }
     Problem problem = problem_status.value();
 
-    std::unique_ptr<Solver> solver = BuildSolver(solver_kind, options.output_path);
+    std::unique_ptr<Solver> solver = BuildSolver(solver_kind, options);
     if (solver == nullptr) {
         std::cerr << "Error: failed to build solver instance for " << solver_name << "\n";
         return 1;
