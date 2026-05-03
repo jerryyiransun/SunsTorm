@@ -474,20 +474,19 @@ def plot_stacked_metric(
         axis.grid(axis="y", linestyle=":", alpha=0.45)
         axis.margins(x=0.02)
 
-    fig.suptitle(metric["label"], fontsize=TITLE_FONT_SIZE + 6, y=0.985)
-    fig.supylabel(metric["ylabel"], fontsize=AXIS_LABEL_FONT_SIZE, x=0.01)
+    fig.supylabel(metric["ylabel"], fontsize=AXIS_LABEL_FONT_SIZE, x=0.035)
     if legend_handles is not None and legend_labels is not None:
         fig.legend(
             legend_handles,
             legend_labels,
             fontsize=LEGEND_FONT_SIZE,
             loc="upper center",
-            bbox_to_anchor=(0.5, 0.955),
+            bbox_to_anchor=(0.5, 0.985),
             ncol=len(legend_labels),
             frameon=True,
         )
 
-    fig.tight_layout(rect=(0.045, 0.035, 1.0, 0.91))
+    fig.tight_layout(rect=(0.03, 0.035, 1.0, 0.94))
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
